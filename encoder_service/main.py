@@ -1,0 +1,280 @@
+# encoder_service/main.py
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Request, Depends
+from shared.utils.logger import logger as base_logger, wrap_logger_methods
+from shared.config import config
+from sentence_transformers import SentenceTransformer
+from pathlib import Path
+import setproctitle
+import asyncio
+from shared.ai_support_models import EncodeRequest, BatchEncodeRequest
+from typing import List
+import re
+
+import torch  # для очистки памяти в методе close()
+
+setproctitle.setproctitle("encoder_service")
+logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
+
+async def verify_internal(request: Request):
+    """
+    Проверка (по секретному заголовку), 
+    что вызов внутренних эндпойнтов является действительно внутренним. 
+    В аргументы функций эндпойнтов необходимо включить: 
+    ```_: None = fastapi.Depends(verify_internal)
+    """
+    internal_secret = request.headers.get("X-Internal-Secret")
+    expected_secret = config.INTERNAL_API_SECRET
+    
+    if not internal_secret or internal_secret != expected_secret:
+        logger.warning(f"Invalid internal secret from {request.client.host}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+class EncoderService:
+    """
+    Сервис кодирования текста в эмбеддинги.
+    
+    КРИТИЧЕСКИ ВАЖНО: SentenceTransformer модели НЕ thread-safe.
+    Нельзя вызывать encoder.encode() параллельно из разных потоков.
+    
+    Решение: использовать синхронные эндпоинты в FastAPI.
+    FastAPI сам будет ставить запросы в очередь и обрабатывать их по одному.
+    """
+    def __init__(self):
+        self.encoder = None  # Модель SentenceTransformer
+        self.service_available = False  # Флаг доступности сервиса
+
+    async def connect(self) -> bool:
+        """Инициализация сервиса - загрузка модели эмбеддингов"""
+        try:
+            model_data = config.EMBEDDING_MODEL
+            model_path = str(Path(config.MODELS_PATH) / model_data['subdir'] / model_data['model'])
+            
+            logger.info(f"Loading encoder model from: {model_path}")
+            logger.info(f"Using device: {model_data['device']}")
+            
+            # Синхронная загрузка модели (в отдельном потоке, чтобы не блокировать запуск)
+            self.encoder = await asyncio.to_thread(
+                SentenceTransformer,
+                model_path,
+                device=model_data['device']
+            )
+            
+            self.service_available = True
+            logger.info("Encoder model loaded successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load encoder model: {e}")
+            self.service_available = False
+            return False
+
+    async def close(self):
+        """Корректное завершение работы с очисткой ресурсов"""
+        if self.encoder:
+            # Явное удаление модели
+            del self.encoder
+            self.encoder = None
+            
+            # Очистка памяти GPU/MPS
+            if torch.backends.mps.is_available():  # для Mac M1/M2
+                torch.mps.empty_cache()
+                logger.info("MPS cache cleared")
+            elif torch.cuda.is_available():        # для NVIDIA GPU
+                torch.cuda.empty_cache()
+                logger.info("CUDA cache cleared")
+        
+        self.service_available = False
+        logger.info("Encoder service shutdown complete")
+
+# Глобальный экземпляр сервиса
+encoder_service = EncoderService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Управление жизненным циклом FastAPI приложения.
+    
+    При запуске: загружаем модель.
+    При завершении: очищаем ресурсы.
+    """
+    try:
+        if not await encoder_service.connect():
+            logger.error("Encoder service failed to initialize")
+        yield
+    finally:
+        await encoder_service.close()
+
+app = FastAPI(
+    lifespan=lifespan, 
+    title="Encoder Service",
+    description="Сервис для кодирования текста в векторные представления"
+)
+
+def _clean_text(text: str) -> str:
+    """
+    Очистка текста перед кодированием.
+    
+    Удаляет нестандартные символы, которые могут вызвать проблемы
+    с токенизатором или кодированием.
+    """
+    if not text:
+        return ""
+    
+    # Оставляем только буквы, цифры, пробелы и основные знаки препинания
+    cleaned_text = re.sub(r'[^\w\s.,!?:\-\'\"()]', '', text, flags=re.UNICODE)
+    # Убираем лишние пробелы и табуляции
+    cleaned_text = ' '.join(cleaned_text.split())
+    return cleaned_text
+
+@app.post("/encode")
+def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
+    """
+    Кодирование одного текста в вектор.
+    
+    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
+    
+    Почему синхронный:
+    1. SentenceTransformer.encode() не thread-safe
+    2. FastAPI для синхронных эндпоинтов ставит запросы в очередь
+    3. Нет риска параллельных вызовов модели
+    
+    Если w_classifier и w_rag вызовут одновременно:
+    - Первый запрос начнет обрабатываться
+    - Второй будет ждать в очереди FastAPI
+    - Когда первый завершится, начнется второй
+    """
+    try:
+        if not encoder_service.service_available:
+            return {"error": "Encoder service not available", "service_available": False}
+        
+        # Очищаем текст
+        cleaned_text = _clean_text(request.text)
+        
+        # СИНХРОННЫЙ вызов модели
+        # FastAPI гарантирует, что в этот момент модель не используется другими запросами
+        embedding = encoder_service.encoder.encode(cleaned_text)
+        
+        return {
+            "embedding": embedding.tolist(),
+            "dimension": len(embedding),
+            "service_available": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Encode endpoint error: {e}")
+        return {
+            "error": str(e),
+            "service_available": encoder_service.service_available
+        }
+
+@app.post("/encode_batch")
+def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)):
+    """
+    Пакетное кодирование нескольких текстов.
+    
+    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
+    
+    Это основной эндпоинт для воркеров (w_classifier и w_rag).
+    
+    Как работает очередность:
+    1. w_classifier отправляет запрос → FastAPI начинает обработку
+    2. w_rag отправляет запрос → FastAPI ставит в очередь
+    3. w_classifier запрос обработан → ответ
+    4. w_rag запрос начинает обработку → ответ
+    
+    Результат: никаких segmentation fault, запросы обрабатываются по очереди.
+    """
+    try:
+        if not encoder_service.service_available:
+            return {"error": "Encoder service not available", "service_available": False}
+        
+        # Очищаем все тексты
+        cleaned_texts = [_clean_text(text) for text in request.texts]
+        
+        # Логируем информацию о батче для отладки
+        total_chars = sum(len(text) for text in cleaned_texts)
+        logger.debug(f"Processing batch: {len(cleaned_texts)} texts, {total_chars} total chars")
+        
+        # СИНХРОННЫЙ вызов модели для всего батча
+        # Модель умеет обрабатывать батчи эффективно, но только по одному батчу за раз
+        embeddings = encoder_service.encoder.encode(cleaned_texts)
+        embeddings_list = [embedding.tolist() for embedding in embeddings]
+        
+        return {
+            "embeddings": embeddings_list,
+            "count": len(embeddings_list),
+            "service_available": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Encode batch endpoint error: {e}")
+        return {
+            "error": str(e),
+            "service_available": encoder_service.service_available
+        }
+
+@app.get("/health")
+async def health_check():
+    """
+    Проверка здоровья сервиса.
+    
+    Этот эндпоинт можно оставить async, так как он
+    не использует модель и вызывается редко.
+    """
+    return {
+        "status": "healthy" if encoder_service.service_available else "degraded",
+        "encoder_loaded": encoder_service.encoder is not None,
+        "service_available": encoder_service.service_available
+    }
+
+@app.get("/status")
+async def status():
+    """
+    Детальный статус сервиса.
+    
+    Можно оставить async, не использует модель.
+    """
+    return {
+        "service": "Encoder Service",
+        "status": "operational" if encoder_service.service_available else "degraded",
+        "encoder_loaded": encoder_service.encoder is not None,
+        "model": config.EMBEDDING_MODEL.get("model", "unknown"),
+        "device": config.EMBEDDING_MODEL.get("device", "cpu"),
+        "note": "All encode endpoints are synchronous for thread safety"
+    }
+
+@app.post("/count_tokens")
+def get_tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
+    """
+    Определение количества токенов в тексте.
+    
+    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
+    
+    Токенизатор также не является полностью thread-safe,
+    поэтому используем синхронный эндпоинт.
+    """
+    try:
+        if not encoder_service.service_available:
+            return {"error": "Encoder service not available", "service_available": False}
+        
+        # Проверяем наличие токенизатора
+        if not hasattr(encoder_service.encoder, 'tokenizer') or encoder_service.encoder.tokenizer is None:
+            return {"error": "Tokenizer not available", "service_available": False}
+        
+        # СИНХРОННЫЙ вызов токенизатора
+        tokens = encoder_service.encoder.tokenizer.encode(request.text, add_special_tokens=True)
+        tokens_count = len(tokens)
+
+        return {
+            "tokens_count": tokens_count,
+            "service_available": True
+        }
+
+    except Exception as e:
+        logger.error(f"Count_tokens endpoint error: {e}")
+        return {
+            "error": str(e),
+            "service_available": encoder_service.service_available
+        }

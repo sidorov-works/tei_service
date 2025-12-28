@@ -1,0 +1,12 @@
+.env
+__pycache__
+/venv
+/logs
+.DS_Store
+dump.rdb
+.overmind.sock
+.overmind.env
+/llm
+/models
+/data
+docker-compose.override.yml
