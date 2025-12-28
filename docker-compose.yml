@@ -1,0 +1,16 @@
+services:
+  product_search_service:
+    build: .
+    ports:
+      - "8260:8260"
+    command: >
+      uvicorn encoder_service.main:app
+      --port 8260
+      --host 0.0.0.0
+      --loop uvloop
+      --lifespan on
+      --timeout-graceful-shutdown 15
+    init: true 
+    env_file:
+      - .env
+    restart: unless-stopped # Перезапускается всегда, кроме явной остановки

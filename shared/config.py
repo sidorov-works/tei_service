@@ -16,10 +16,6 @@ class DefaultConfig:
     LOG_PATH = Path("logs")
     MODELS_PATH = Path("models")
 
-    REQUEST_TIMEOUT = 10
-
-    GRACEFUL_SHUTDOWN_TIMEOUT = 15
-
     ENCODER_SERVICE_URL = os.getenv("ENCODER_SERVICE_URL")
 
     ENCODE_TIMEOUT = float(os.getenv("ENCODE_TIMEOUT", "30.0"))
