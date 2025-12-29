@@ -25,7 +25,7 @@ class DefaultConfig:
     EMBEDDING_MODEL = {
         "model": "deepvk/USER2-base",  # Название модели на Hugging Face Hub
         "subdir": "sentence-transformers",
-        "device": "mps",  # или "cpu"/"mps" в зависимости от оборудования
+        "device": os.getenv("DEVICE", "cpu"),  # или "cpu"/"mps" в зависимости от оборудования
         "vector_size": 768,  # Полная размерность эмбеддингов (Hidden Dim)
         "max_seq_length": 8192,  # Поддерживаемая длина контекста!
         "query_prefix": "search_query: ",
@@ -36,7 +36,7 @@ class DefaultConfig:
     # EMBEDDING_MODEL = {
     #     "model": "ai-forever/FRIDA",  
     #     "subdir": "sentence-transformers",
-    #     "device": "mps",  # или "cpu"/"cuda"
+    #     "device": os.getenv("DEVICE", "cpu"),  # или "cpu"/"cuda"
     #     "vector_size": 768,
     #     "max_seq_length": 512,  # у FRIDA ограничение 512 токенов ???
     #     "query_prefix": "search_query: ",
