@@ -1,23 +1,28 @@
 services:
   encoder_service:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.windows
     ports:
       - "8260:8260"
     volumes:
-      - ./models:/app/models  # скачанные модели
+      - ./models:/app/models
     env_file:
       - .env
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
-      --port 8260
-      --host 0.0.0.0
-      --workers 1 
-      --loop uvloop
-      --lifespan on
-      --timeout-graceful-shutdown 15
+      --port 8260 --host 0.0.0.0 --workers 1
+      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
     init: true
-    # Оптимальные настройки для ML
-    shm_size: '2gb'      # Shared memory (критически для PyTorch dataloader)
-    mem_limit: 4g        # Максимум ОЗУ для контейнера
-    cpus: '2.0'          # Максимум 2 CPU ядра
+    shm_size: '2gb'
+    mem_limit: 8g
+    cpus: '4.0'
+    # ✅ Ключевое: резервируем GPU для Windows[citation:1]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
