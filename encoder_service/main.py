@@ -49,24 +49,36 @@ class EncoderService:
         """Инициализация сервиса - загрузка модели эмбеддингов"""
         try:
             model_data = config.EMBEDDING_MODEL
-            model_path = str(Path(config.MODELS_PATH) / model_data['subdir'] / model_data['model'])
+            model_path = Path(config.MODELS_PATH) / model_data['subdir'] / model_data['model']  # Оставляем как Path
+
+            # Проверяем и скачиваем модель, если её нет
+            if not model_path.exists():
+                logger.info(f"Модель не найдена по пути {model_path}. Начинаю скачивание...")
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                # Синхронное скачивание в отдельном потоке
+                tmp_model = await asyncio.to_thread(
+                    SentenceTransformer, 
+                    model_data['model']  # Скачиваем по имени с Hugging Face Hub
+                )
+                await asyncio.to_thread(tmp_model.save, str(model_path))
+                logger.info(f"Модель сохранена в {model_path}")
+
+            logger.info(f"Загружаю модель с диска: {model_path}")
+            logger.info(f"Использую устройство: {model_data['device']}")
             
-            logger.info(f"Loading encoder model from: {model_path}")
-            logger.info(f"Using device: {model_data['device']}")
-            
-            # Синхронная загрузка модели (в отдельном потоке, чтобы не блокировать запуск)
+            # Синхронная загрузка модели с диска
             self.encoder = await asyncio.to_thread(
                 SentenceTransformer,
-                model_path,
+                str(model_path),  # Загружаем с локального диска
                 device=model_data['device']
             )
             
             self.service_available = True
-            logger.info("Encoder model loaded successfully")
+            logger.info("Модель энкодера успешно загружена")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to load encoder model: {e}")
+            logger.error(f"Ошибка загрузки модели: {e}")
             self.service_available = False
             return False
 
