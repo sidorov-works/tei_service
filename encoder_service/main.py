@@ -9,8 +9,9 @@ from pathlib import Path
 import setproctitle
 import asyncio
 from shared.ai_support_models import EncodeRequest, BatchEncodeRequest
-from typing import List
+from typing import List, Optional
 import re
+import math
 
 import torch  # для очистки памяти в методе close()
 
@@ -140,6 +141,20 @@ def _clean_text(text: str) -> str:
     cleaned_text = ' '.join(cleaned_text.split())
     return cleaned_text
 
+def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
+    """
+    Очищает вектор от NaN и Inf
+    """
+    cleaned_embedding = []
+    for x in embedding:
+        if math.isnan(x):
+            cleaned_embedding.append(0)
+        elif math.isinf(x):
+            raise Exception("Inf value in embedding")
+        else:
+            cleaned_embedding.append(x)
+    return cleaned_embedding
+
 @app.post("/encode")
 def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
@@ -167,9 +182,10 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         # СИНХРОННЫЙ вызов модели
         # FastAPI гарантирует, что в этот момент модель не используется другими запросами
         embedding = encoder_service.encoder.encode(cleaned_text)
+        cleaned_embedding = _clean_embedding(embedding.tolist()) 
         
         return {
-            "embedding": embedding.tolist(),
+            "embedding": cleaned_embedding,
             "dimension": len(embedding),
             "service_available": True
         }
@@ -212,7 +228,7 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         # СИНХРОННЫЙ вызов модели для всего батча
         # Модель умеет обрабатывать батчи эффективно, но только по одному батчу за раз
         embeddings = encoder_service.encoder.encode(cleaned_texts)
-        embeddings_list = [embedding.tolist() for embedding in embeddings]
+        embeddings_list = [_clean_embedding(embedding.tolist()) for embedding in embeddings]
         
         return {
             "embeddings": embeddings_list,
