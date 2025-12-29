@@ -2,7 +2,7 @@ services:
   encoder_service:
     build:
       context: .
-      dockerfile: Dockerfile.windows
+      dockerfile: dockerfile.windows
     ports:
       - "8260:8260"
     volumes:
