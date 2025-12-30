@@ -8,3 +8,4 @@ dump.rdb
 /models
 /data
 docker-compose.override.yml
+procfile
