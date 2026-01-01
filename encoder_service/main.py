@@ -5,10 +5,10 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 from shared.config import config
 from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel
 from pathlib import Path
 import setproctitle
 import asyncio
-from shared.ai_support_models import EncodeRequest, BatchEncodeRequest
 from typing import List, Optional
 import re
 import math
@@ -17,6 +17,21 @@ import torch  # для очистки памяти в методе close()
 
 setproctitle.setproctitle("encoder_service")
 logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
+
+
+# Модели данных для валидации запросов
+class EncodeRequest(BaseModel):
+    """
+    Для передачи энкодеру одного текста текста
+    """
+    text: str
+    request_type: Optional[str] = "query"
+
+class BatchEncodeRequest(BaseModel):
+    """Запрос на пакетное кодирование"""
+    texts: List[str]
+    request_type: Optional[str] = "query"
+
 
 async def verify_internal(request: Request):
     """
@@ -178,6 +193,13 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         
         # Очищаем текст
         cleaned_text = _clean_text(request.text)
+
+        # Добавляем префикс в зависимости от укзанного типа запроса
+        if request.request_type:
+            if request.request_type == "query":
+                cleaned_text = config.EMBEDDING_MODEL.get("query_prefix", "") + cleaned_text
+            elif request.request_type == "document":
+                cleaned_text = config.EMBEDDING_MODEL.get("document_prefix", "") + cleaned_text
         
         # СИНХРОННЫЙ вызов модели
         # FastAPI гарантирует, что в этот момент модель не используется другими запросами
@@ -218,8 +240,19 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         if not encoder_service.service_available:
             return {"error": "Encoder service not available", "service_available": False}
         
-        # Очищаем все тексты
-        cleaned_texts = [_clean_text(text) for text in request.texts]
+        # Префикс в зависимости от укзанного типа запроса
+        prefix = None
+        if request.request_type:
+            if request.request_type == "query":
+                prefix = config.EMBEDDING_MODEL.get("query_prefix", "search_query: ")
+            elif request.request_type == "document":
+                prefix = config.EMBEDDING_MODEL.get("document_prefix", "search_document: ")
+        
+        # Очищаем все тексты и добавляем префикс (если нужен)
+        if prefix:
+            cleaned_texts = [prefix + _clean_text(text) for text in request.texts]
+        else:
+            cleaned_texts = [_clean_text(text) for text in request.texts]
         
         # Логируем информацию о батче для отладки
         total_chars = sum(len(text) for text in cleaned_texts)
@@ -242,6 +275,13 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
             "error": str(e),
             "service_available": encoder_service.service_available
         }
+    
+@app.get("/vector_size")
+async def get_vector_size():
+    """
+    Возвращает длину вектора в используемой модели
+    """
+    return {"vector_size": config.EMBEDDING_MODEL.get("vector_size", 0)}
 
 @app.get("/health")
 async def health_check():
