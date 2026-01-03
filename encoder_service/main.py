@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 from shared.config import config
 from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer
 from pydantic import BaseModel
 from pathlib import Path
 import setproctitle
@@ -58,43 +59,91 @@ class EncoderService:
     FastAPI сам будет ставить запросы в очередь и обрабатывать их по одному.
     """
     def __init__(self):
-        self.encoder = None  # Модель SentenceTransformer
+        self.encoder = None   # Модель SentenceTransformer
+        self.tokenizer = None # Отдельный объект токенизатора
         self.service_available = False  # Флаг доступности сервиса
 
     async def connect(self) -> bool:
         """Инициализация сервиса - загрузка модели эмбеддингов"""
         try:
             model_data = config.EMBEDDING_MODEL
-            model_path = Path(config.MODELS_PATH) / model_data['subdir'] / model_data['model']  # Оставляем как Path
-
-            # Проверяем и скачиваем модель, если её нет
+            model_id = model_data['model']
+            
+            model_path = Path(config.MODELS_PATH) / model_data['subdir'] / model_id
+            
+            # 1. Проверяем и скачиваем SentenceTransformer модель, если её нет
             if not model_path.exists():
                 logger.info(f"Модель не найдена по пути {model_path}. Начинаю скачивание...")
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                # Синхронное скачивание в отдельном потоке
+                
+                # Скачиваем модель из интернета
                 tmp_model = await asyncio.to_thread(
                     SentenceTransformer, 
-                    model_data['model']  # Скачиваем по имени с Hugging Face Hub
+                    model_id
                 )
+                # Сохраняем локально
                 await asyncio.to_thread(tmp_model.save, str(model_path))
                 logger.info(f"Модель сохранена в {model_path}")
+            else:
+                logger.info(f"Найдена локальная копия модели: {model_path}")
 
             logger.info(f"Загружаю модель с диска: {model_path}")
             logger.info(f"Использую устройство: {model_data['device']}")
             
-            # Синхронная загрузка модели с диска
+            # 2. Загружаем SentenceTransformer модель с диска
             self.encoder = await asyncio.to_thread(
                 SentenceTransformer,
-                str(model_path),  # Загружаем с локального диска
+                str(model_path),
                 device=model_data['device']
             )
+
+            # 3. Проверяем наличие токенизатора локально SentenceTransformer 
+            # сохраняет модель в своей структуре, а токенизатор нужно сохранять отдельно
+            tokenizer_path = model_path / "tokenizer"
             
+            if tokenizer_path.exists() and (tokenizer_path / "tokenizer_config.json").exists():
+                # Загружаем токенизатор из локальной копии
+                logger.info(f"Загружаю токенизатор из локальной копии: {tokenizer_path}")
+                self.tokenizer = await asyncio.to_thread(
+                    AutoTokenizer.from_pretrained,
+                    str(tokenizer_path)
+                )
+            else:
+                # Скачиваем токенизатор из интернета и сохраняем локально
+                logger.info(f"Загружаю токенизатор из интернета: {model_id}")
+                self.tokenizer = await asyncio.to_thread(
+                    AutoTokenizer.from_pretrained,
+                    model_id
+                )
+                
+                # Сохраняем токенизатор локально для будущих запусков
+                tokenizer_path.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(self.tokenizer.save_pretrained, str(tokenizer_path))
+                logger.info(f"Токенизатор сохранен в {tokenizer_path}")
+            
+            # 4. Проверяем загрузку
+            if self.tokenizer is None:
+                logger.error("Не удалось загрузить токенизатор")
+                return False
+                
             self.service_available = True
-            logger.info("Модель энкодера успешно загружена")
+            logger.info(f"Модель энкодера успешно загружена")
+            logger.info(f"Токенизатор загружен, размер словаря: {self.tokenizer.vocab_size}")
+            
+            # 5. Проверяем соответствие max_seq_length в конфиге
+            if hasattr(self.encoder, 'max_seq_length'):
+                config_max_len = model_data.get('max_seq_length', 512)
+                if self.encoder.max_seq_length != config_max_len:
+                    logger.warning(
+                        f"Модель имеет max_seq_length={self.encoder.max_seq_length}, "
+                        f"но в конфиге указано {config_max_len}. "
+                        f"Используется значение модели."
+                    )
+            
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка загрузки модели: {e}")
+            logger.error(f"Ошибка загрузки модели: {e}", exc_info=True)
             self.service_available = False
             return False
 
@@ -197,9 +246,9 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         # Добавляем префикс в зависимости от укзанного типа запроса
         if request.request_type:
             if request.request_type == "query":
-                cleaned_text = config.EMBEDDING_MODEL.get("query_prefix", "") + cleaned_text
+                cleaned_text = config.EMBEDDING_MODEL.get("query_prefix", "search_query: ") + cleaned_text
             elif request.request_type == "document":
-                cleaned_text = config.EMBEDDING_MODEL.get("document_prefix", "") + cleaned_text
+                cleaned_text = config.EMBEDDING_MODEL.get("document_prefix", "search_document: ") + cleaned_text
         
         # СИНХРОННЫЙ вызов модели
         # FastAPI гарантирует, что в этот момент модель не используется другими запросами
@@ -277,11 +326,18 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         }
     
 @app.get("/vector_size")
-async def get_vector_size():
+def get_vector_size():
     """
     Возвращает длину вектора в используемой модели
     """
     return {"vector_size": config.EMBEDDING_MODEL.get("vector_size", 0)}
+
+@app.get("/max_length")
+def get_max_length():
+    """
+    Возвращает максимальную длину текста (в токенах)
+    """
+    return {"max_length": config.EMBEDDING_MODEL.get("max_seq_length", 0)}
 
 @app.get("/health")
 async def health_check():
@@ -327,18 +383,12 @@ def get_tokens_count(request: EncodeRequest, _: None = Depends(verify_internal))
         if not encoder_service.service_available:
             return {"error": "Encoder service not available", "service_available": False}
         
-        # Проверяем наличие токенизатора
-        if not hasattr(encoder_service.encoder, 'tokenizer') or encoder_service.encoder.tokenizer is None:
-            return {"error": "Tokenizer not available", "service_available": False}
-        
-        # СИНХРОННЫЙ вызов токенизатора
-        tokens = encoder_service.encoder.tokenizer.encode(request.text, add_special_tokens=True)
-        tokens_count = len(tokens)
-
-        return {
-            "tokens_count": tokens_count,
-            "service_available": True
-        }
+        tokens = encoder_service.tokenizer.encode(
+            request.text,
+            add_special_tokens=True,
+            truncation=True
+        )
+        return {"tokens_count": len(tokens)}
 
     except Exception as e:
         logger.error(f"Count_tokens endpoint error: {e}")

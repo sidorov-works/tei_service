@@ -9,7 +9,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.windows.txt
 COPY . .
 RUN mkdir -p logs models
-# Далее всё как в основном Dockerfile
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
     TOKENIZERS_PARALLELISM=false
