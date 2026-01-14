@@ -370,7 +370,7 @@ async def status():
     }
 
 @app.post("/count_tokens")
-def get_tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
+def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
     Определение количества токенов в тексте.
     
