@@ -1,33 +1,32 @@
-# Encoder Service
+## Encoder Service
 
 Сервис векторизации текста, предоставляющий HTTP API для получения эмбеддингов через FastAPI. Использует модели на базе SentenceTransformers для преобразования текста в векторные представления.
 
-## Содержание
+### Содержание
 - [Архитектура](#архитектура)
 - [API Эндпоинты](#api-эндпоинты)
 - [Модели данных](#модели-данных)
 - [Потокобезопасность](#потокобезопасность)
 - [Установка и запуск](#установка-и-запуск)
 - [Запуск в Docker](#запуск-в-docker)
-- [Конфигурация нескольких энкодеров](#конфигурация-нескольких-энкодеров)
-- [Интеграция с другими сервисами](#интеграция-с-другими-сервисами)
+- [Конфигурация](#конфигурация)
 - [Обработка ошибок](#обработка-ошибок)
 - [Мониторинг](#мониторинг)
 - [Производительность](#производительность)
 - [Безопасность](#безопасность)
 - [Разработка и отладка](#разработка-и-отладка)
 
-## Архитектура
+### Архитектура
 
 Сервис построен с учетом следующих ключевых требований:
 
 - **Thread-safe работа с моделями** — SentenceTransformer модели не являются потокобезопасными, поэтому все эндпоинты, работающие с моделью, сделаны синхронными. FastAPI автоматически ставит запросы в очередь, гарантируя последовательную обработку.
 - **Батчевая обработка** — поддержка пакетного кодирования нескольких текстов за один запрос для оптимальной производительности.
 - **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально для последующих запусков.
-- **Изоляция через HTTP** — сервис работает как отдельный процесс, взаимодействие с другими компонентами через HTTP API с внутренней аутентификацией.
-- **Самоидентификация** — каждый экземпляр энкодера имеет уникальное имя и предоставляет клиентам полную информацию о своей модели через отдельный эндпоинт.
+- **Изоляция через HTTP** — сервис работает как отдельный процесс.
+- **Самоидентификация** — каждый экземпляр энкодера имеет уникальное имя и предоставляет информацию о своей модели через отдельный эндпоинт.
 
-## API Эндпоинты
+### API Эндпоинты
 
 Все эндпоинты, работающие с моделью (кроме `/health` и `/info`), требуют заголовок `X-Internal-Secret` для аутентификации.
 
@@ -41,7 +40,7 @@
 | `/max_length` | GET | Максимальная длина текста в токенах | Да |
 | `/health` | GET | Проверка здоровья сервиса | Нет |
 
-### Информация об энкодере (`/info`)
+#### Информация об энкодере (`/info`)
 
 Возвращает структурированную информацию, необходимую клиентам для работы:
 
@@ -64,7 +63,7 @@ curl http://localhost:8001/info
 }
 ```
 
-### Кодирование текста (`/encode`)
+#### Кодирование текста (`/encode`)
 
 ```bash
 curl -X POST http://localhost:8001/encode \
@@ -81,7 +80,7 @@ curl -X POST http://localhost:8001/encode \
 }
 ```
 
-### Пакетное кодирование (`/encode_batch`)
+#### Пакетное кодирование (`/encode_batch`)
 
 ```bash
 curl -X POST http://localhost:8001/encode_batch \
@@ -98,7 +97,7 @@ curl -X POST http://localhost:8001/encode_batch \
 }
 ```
 
-### Проверка здоровья (`/health`)
+#### Проверка здоровья (`/health`)
 
 ```bash
 curl http://localhost:8001/health
@@ -112,13 +111,13 @@ curl http://localhost:8001/health
 }
 ```
 
-## Модели данных
+### Модели данных
 
-### shared/encoder_models.py
+#### shared/encoder_models.py
 
 Pydantic модели для описания энкодеров и их свойств.
 
-#### EncoderModelInfo
+##### EncoderModelInfo
 
 Информация о модели, используемой в энкодере.
 
@@ -142,7 +141,7 @@ class EncoderModelInfo(BaseModel):
         frozen = True
 ```
 
-#### EncoderInfo
+##### EncoderInfo
 
 Полное описание экземпляра Encoder Service.
 
@@ -164,9 +163,9 @@ class EncoderInfo(BaseModel):
         frozen = True
 ```
 
-### Модели запросов
+#### Модели запросов
 
-#### EncodeRequest
+##### EncodeRequest
 
 ```python
 class EncodeRequest(BaseModel):
@@ -174,7 +173,7 @@ class EncodeRequest(BaseModel):
     request_type: Optional[str] = "query"  # "query" или "document"
 ```
 
-#### BatchEncodeRequest
+##### BatchEncodeRequest
 
 ```python
 class BatchEncodeRequest(BaseModel):
@@ -182,7 +181,7 @@ class BatchEncodeRequest(BaseModel):
     request_type: Optional[str] = "query"  # "query" или "document"
 ```
 
-## Потокобезопасность
+### Потокобезопасность
 
 **Критически важно:** SentenceTransformer модели не являются потокобезопасными. Параллельные вызовы `encoder.encode()` из разных потоков могут привести к segmentation fault.
 
@@ -192,28 +191,28 @@ class BatchEncodeRequest(BaseModel):
 - Запросы обрабатываются последовательно, гарантируя безопасность
 
 Пример работы очереди:
-1. `w_classifier` отправляет запрос → FastAPI начинает обработку
-2. `w_rag` отправляет запрос → FastAPI ставит в очередь
-3. Завершение обработки запроса `w_classifier` → отправка ответа
-4. Начало обработки запроса `w_rag` → отправка ответа
+1. Первый запрос → FastAPI начинает обработку
+2. Второй запрос → FastAPI ставит в очередь
+3. Завершение обработки первого запроса → отправка ответа
+4. Начало обработки второго запроса → отправка ответа
 
-## Установка и запуск
+### Установка и запуск
 
-### Предварительные требования
+#### Предварительные требования
 - Python 3.9+
 - CUDA (опционально, для GPU) или MPS (для Mac M1/M2)
 
-### Установка зависимостей
+#### Установка зависимостей
 ```bash
 pip install -r requirements.txt
 ```
 
-### Скачивание модели
+#### Скачивание модели
 ```bash
 python -m shared.utils.download_models
 ```
 
-### Настройка конфигурации
+#### Настройка конфигурации
 Создайте файл `.env`:
 ```env
 ENCODER_NAME=rag                      # Уникальное имя этого энкодера
@@ -224,14 +223,12 @@ ENCODE_TIMEOUT=30.0
 ENCODE_BATCH_TIMEOUT=60.0
 ```
 
-### Запуск сервиса
+#### Запуск сервиса
 ```bash
 uvicorn encoder_service.main:app --host 0.0.0.0 --port 8001 --workers 1
 ```
 
-## Запуск в Docker
-
-### Запуск на компьютере с NVIDIA GPU
+### Запуск в Docker
 
 #### Dockerfile
 ```dockerfile
@@ -283,7 +280,11 @@ services:
               capabilities: [gpu]
 ```
 
-#### .env для GPU
+### Конфигурация
+
+Каждый экземпляр энкодера запускается со своим `.env` файлом:
+
+**Пример .env для GPU:**
 ```env
 ENCODER_NAME=rag
 DEVICE=cuda
@@ -291,120 +292,26 @@ INTERNAL_API_SECRET=your-secret-key
 ENCODER_SERVICE_URL=http://encoder_service:8260
 ENCODE_TIMEOUT=30.0
 ENCODE_BATCH_TIMEOUT=60.0
-```
-
-### Запуск на Mac (M1/M2)
-
-#### .env для Mac
-```env
-ENCODER_NAME=rag
-DEVICE=mps
-INTERNAL_API_SECRET=your-secret-key
-ENCODER_SERVICE_URL=http://localhost:8001
-```
-
-#### Procfile для Overmind
-```
-encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT:-8001} --workers 1 --lifespan on --timeout-graceful-shutdown 10
-```
-
-## Конфигурация нескольких энкодеров
-
-### shared/config.py
-```python
-class DefaultConfig:
-    # Словарь {имя_энкодера: url}
-    ENCODERS = {
-        "rag": "http://encoder-rag:8260",
-        "classifier": "http://encoder-classifier:8261",
-        "multilingual": "http://encoder-multi:8262"
-    }
-```
-
-Каждый экземпляр энкодера запускается со своим `.env` файлом:
-
-**encoder-rag/.env**
-```env
-ENCODER_NAME=rag
-DEVICE=cuda
 EMBEDDING_MODEL={"model": "deepvk/USER2-base", "vector_size": 768, "max_seq_length": 8192}
 ```
 
-**encoder-classifier/.env**
+**Пример .env для CPU:**
 ```env
 ENCODER_NAME=classifier
 DEVICE=cpu
+INTERNAL_API_SECRET=your-secret-key
+ENCODER_SERVICE_URL=http://localhost:8001
+ENCODE_TIMEOUT=30.0
+ENCODE_BATCH_TIMEOUT=60.0
 EMBEDDING_MODEL={"model": "ai-forever/FRIDA", "vector_size": 768, "max_seq_length": 512}
 ```
 
-## Интеграция с другими сервисами
-
-### shared/encoder_client.py (фрагмент)
-
-```python
-from shared.encoder_client import encoder_client
-
-# Инициализация (получение информации обо всех энкодерах)
-await encoder_client.initialize()
-
-# Кодирование для одного энкодера
-embedding = await encoder_client.encode_text(
-    text="Проблема с доступом к почте",
-    request_type="query",
-    encoders=["rag"]
-)
-
-# Кодирование для нескольких энкодеров параллельно
-results = await encoder_client.encode_text(
-    text="Проблема с доступом к почте",
-    request_type="query",
-    encoders=["rag", "classifier"]
-)
-# results = {
-#     "rag": [0.123, -0.456, ...],
-#     "classifier": [0.789, -0.321, ...]
-# }
-
-# Пакетное кодирование
-embeddings = await encoder_client.encode_batch(
-    texts=["текст1", "текст2"],
-    request_type="document",
-    encoders=["rag"]
-)
-
-# Получение информации о конкретном энкодере
-info = await encoder_client.get_encoder_info("rag")
-print(f"Модель: {info.model_info.name}")
-print(f"Размерность: {info.model_info.vector_size}")
-```
-
-### Интеграция с RAG-подсистемой
-
-**document_service.py**
-```python
-# Получение размерностей векторов для создания коллекций
-self._vector_sizes = {
-    name: info.model_info.vector_size 
-    for name, info in self._encoder.encoders.items()
-}
-```
-
-**rag_service.py**
-```python
-# Кодирование запроса для поиска
-query_embedding = await self._encoder.encode_text(
-    request.query,
-    encoders=["rag"]  # явно указываем энкодер
-)
-```
-
-## Обработка ошибок
+### Обработка ошибок
 
 Сервис использует многоуровневую систему обработки ошибок:
 
-1. **На уровне HTTP-клиента** — повторные попытки с экспоненциальной задержкой
-2. **На уровне API** — возврат информативных сообщений об ошибках
-3. **На уровне модели** — очистка NaN значений в эмбеддингах
+1. **На уровне API** — возврат информативных сообщений об ошибках
+2. **На уровне модели** — очистка NaN значений в эмбеддингах
 
 Пример ответа с ошибкой:
 ```json
@@ -414,43 +321,42 @@ query_embedding = await self._encoder.encode_text(
 }
 ```
 
-## Мониторинг
+### Мониторинг
 
-### Health check
+#### Health check
 ```bash
 curl http://localhost:8001/health
 ```
 
-### Информация об энкодере
+#### Информация об энкодере
 ```bash
 curl http://localhost:8001/info
 ```
 
-## Производительность
+### Производительность
 
 - **Батчевая обработка** — модель эффективно обрабатывает до 32 текстов за один запрос
 - **Кэширование модели** — модель загружается в память один раз при старте
 - **Очистка памяти** — при завершении работы освобождаются ресурсы GPU/MPS
 - **Таймауты** — настраиваемые таймауты для разных типов запросов
-- **Параллельные запросы к разным энкодерам** — клиент выполняет запросы параллельно
 
-## Безопасность
+### Безопасность
 
 - **Внутренняя аутентификация** — все эндпоинты, кроме `/health` и `/info`, защищены заголовком `X-Internal-Secret`
 - **Очистка входных данных** — удаление нестандартных символов из текста
 - **Валидация через Pydantic** — проверка структуры запросов
 - **Информация о модели** — эндпоинт `/info` открыт, так как не содержит чувствительных данных
 
-## Разработка и отладка
+### Разработка и отладка
 
-### Логирование
+#### Логирование
 ```python
 logger.info(f"Starting encoder instance: {self.encoder_name}")
 logger.info(f"Processing batch: {len(texts)} texts")
 logger.error(f"Encode endpoint error: {e}", exc_info=True)
 ```
 
-### Очистка эмбеддингов
+#### Очистка эмбеддингов
 ```python
 def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
     cleaned_embedding = []
