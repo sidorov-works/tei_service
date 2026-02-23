@@ -9,6 +9,8 @@ from pathlib import Path
 load_dotenv(override=True) 
 
 class DefaultConfig:
+
+    ENCODER_NAME = os.getenv("ENCODER_NAME", "default")
     
     INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
     EXC_INFO = False # выводить ли в лог весь stacktrace

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 from shared.config import config
+from shared.encoder_models import EncoderInfo, EncoderModelInfo
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 from pydantic import BaseModel
@@ -62,6 +63,7 @@ class EncoderService:
         self.encoder = None   # Модель SentenceTransformer
         self.tokenizer = None # Отдельный объект токенизатора
         self.service_available = False  # Флаг доступности сервиса
+        self.encoder_name = ""   # позже подтянем из конфига (чтобы наверняка)
 
     async def connect(self) -> bool:
         """Инициализация сервиса - загрузка модели эмбеддингов"""
@@ -70,6 +72,8 @@ class EncoderService:
             model_id = model_data['model']
             
             model_path = Path(config.MODELS_PATH) / model_data['subdir'] / model_id
+
+            self.encoder_name = config.ENCODER_NAME
             
             # 1. Проверяем и скачиваем SentenceTransformer модель, если её нет
             if not model_path.exists():
@@ -219,6 +223,53 @@ def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
             cleaned_embedding.append(x)
     return cleaned_embedding
 
+
+@app.get("/info", response_model=EncoderInfo)
+async def get_encoder_info(request: Request):
+    """
+    Возвращает полную информацию об этом экземпляре энкодера.
+    
+    Этот эндпоинт не требует аутентификации, так как используется
+    клиентами при инициализации для получения данных о модели.
+    Информация о модели не является чувствительной.
+    
+    Returns:
+        EncoderInfo: Информация об энкодере и его модели
+    """
+    if not encoder_service.service_available:
+        # Возвращаем минимальную информацию, если сервис не готов
+        return EncoderInfo(
+            name=encoder_service.encoder_name,
+            url=str(request.base_url),
+            model_info=EncoderModelInfo(
+                name="unknown",
+                vector_size=0,
+                max_seq_length=0,
+                query_prefix="",
+                document_prefix=""
+            ),
+            status="degraded"
+        )
+    
+    # Формируем информацию о модели из конфига
+    model_info = EncoderModelInfo(
+        name=config.EMBEDDING_MODEL.get("model", "unknown"),
+        vector_size=config.EMBEDDING_MODEL.get("vector_size", 0),
+        max_seq_length=config.EMBEDDING_MODEL.get("max_seq_length", 512),
+        query_prefix=config.EMBEDDING_MODEL.get("query_prefix", ""),
+        document_prefix=config.EMBEDDING_MODEL.get("document_prefix", "")
+    )
+    
+    # Определяем базовый URL (берём из запроса, чтобы работало за прокси)
+    base_url = str(request.base_url).rstrip('/')
+    
+    return EncoderInfo(
+        name=encoder_service.encoder_name,
+        url=base_url,
+        model_info=model_info,
+        status="operational"
+    )
+
 @app.post("/encode")
 def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
@@ -353,21 +404,21 @@ async def health_check():
         "service_available": encoder_service.service_available
     }
 
-@app.get("/status")
-async def status():
-    """
-    Детальный статус сервиса.
+# @app.get("/status")
+# async def status():
+#     """
+#     Детальный статус сервиса.
     
-    Можно оставить async, не использует модель.
-    """
-    return {
-        "service": "Encoder Service",
-        "status": "operational" if encoder_service.service_available else "degraded",
-        "encoder_loaded": encoder_service.encoder is not None,
-        "model": config.EMBEDDING_MODEL.get("model", "unknown"),
-        "device": config.EMBEDDING_MODEL.get("device", "cpu"),
-        "note": "All encode endpoints are synchronous for thread safety"
-    }
+#     Можно оставить async, не использует модель.
+#     """
+#     return {
+#         "service": "Encoder Service",
+#         "status": "operational" if encoder_service.service_available else "degraded",
+#         "encoder_loaded": encoder_service.encoder is not None,
+#         "model": config.EMBEDDING_MODEL.get("model", "unknown"),
+#         "device": config.EMBEDDING_MODEL.get("device", "cpu"),
+#         "note": "All encode endpoints are synchronous for thread safety"
+#     }
 
 @app.post("/count_tokens")
 def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
