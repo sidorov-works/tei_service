@@ -68,10 +68,10 @@ class EncoderService:
     async def connect(self) -> bool:
         """Инициализация сервиса - загрузка модели эмбеддингов"""
         try:
-            model_data = config.EMBEDDING_MODEL
-            model_id = model_data['model']
+            model_info = config.EMBEDDING_MODEL  # теперь это EncoderModelInfo, не dict
+            model_id = model_info.name  # вместо model_data['model']
             
-            model_path = Path(config.MODELS_PATH) / model_data['subdir'] / model_id
+            model_path: Path = config.MODEL_PATH / model_id
 
             self.encoder_name = config.ENCODER_NAME
             
@@ -92,35 +92,31 @@ class EncoderService:
                 logger.info(f"Найдена локальная копия модели: {model_path}")
 
             logger.info(f"Загружаю модель с диска: {model_path}")
-            logger.info(f"Использую устройство: {model_data['device']}")
+            logger.info(f"Использую устройство: {config.DEVICE}")
             
             # 2. Загружаем SentenceTransformer модель с диска
             self.encoder = await asyncio.to_thread(
                 SentenceTransformer,
                 str(model_path),
-                device=model_data['device']
+                device=config.DEVICE  # напрямую из конфига
             )
 
-            # 3. Проверяем наличие токенизатора локально SentenceTransformer 
-            # сохраняет модель в своей структуре, а токенизатор нужно сохранять отдельно
+            # 3. Загружаем токенизатор
             tokenizer_path = model_path / "tokenizer"
             
             if tokenizer_path.exists() and (tokenizer_path / "tokenizer_config.json").exists():
-                # Загружаем токенизатор из локальной копии
                 logger.info(f"Загружаю токенизатор из локальной копии: {tokenizer_path}")
                 self.tokenizer = await asyncio.to_thread(
                     AutoTokenizer.from_pretrained,
                     str(tokenizer_path)
                 )
             else:
-                # Скачиваем токенизатор из интернета и сохраняем локально
                 logger.info(f"Загружаю токенизатор из интернета: {model_id}")
                 self.tokenizer = await asyncio.to_thread(
                     AutoTokenizer.from_pretrained,
                     model_id
                 )
                 
-                # Сохраняем токенизатор локально для будущих запусков
                 tokenizer_path.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(self.tokenizer.save_pretrained, str(tokenizer_path))
                 logger.info(f"Токенизатор сохранен в {tokenizer_path}")
@@ -131,16 +127,16 @@ class EncoderService:
                 return False
                 
             self.service_available = True
-            logger.info(f"Модель энкодера успешно загружена")
-            logger.info(f"Токенизатор загружен, размер словаря: {self.tokenizer.vocab_size}")
+            logger.info(f"Модель энкодера успешно загружена: {model_info.name}")
+            logger.info(f"Размер вектора: {model_info.vector_size}")
+            logger.info(f"Max sequence length: {model_info.max_seq_length}")
             
-            # 5. Проверяем соответствие max_seq_length в конфиге
+            # 5. Проверяем соответствие max_seq_length
             if hasattr(self.encoder, 'max_seq_length'):
-                config_max_len = model_data.get('max_seq_length', 512)
-                if self.encoder.max_seq_length != config_max_len:
+                if self.encoder.max_seq_length != model_info.max_seq_length:
                     logger.warning(
                         f"Модель имеет max_seq_length={self.encoder.max_seq_length}, "
-                        f"но в конфиге указано {config_max_len}. "
+                        f"но в конфиге указано {model_info.max_seq_length}. "
                         f"Используется значение модели."
                     )
             
@@ -240,7 +236,6 @@ async def get_encoder_info(request: Request):
         # Возвращаем минимальную информацию, если сервис не готов
         return EncoderInfo(
             name=encoder_service.encoder_name,
-            url=str(request.base_url),
             model_info=EncoderModelInfo(
                 name="unknown",
                 vector_size=0,
@@ -251,22 +246,9 @@ async def get_encoder_info(request: Request):
             status="degraded"
         )
     
-    # Формируем информацию о модели из конфига
-    model_info = EncoderModelInfo(
-        name=config.EMBEDDING_MODEL.get("model", "unknown"),
-        vector_size=config.EMBEDDING_MODEL.get("vector_size", 0),
-        max_seq_length=config.EMBEDDING_MODEL.get("max_seq_length", 512),
-        query_prefix=config.EMBEDDING_MODEL.get("query_prefix", ""),
-        document_prefix=config.EMBEDDING_MODEL.get("document_prefix", "")
-    )
-    
-    # Определяем базовый URL (берём из запроса, чтобы работало за прокси)
-    base_url = str(request.base_url).rstrip('/')
-    
     return EncoderInfo(
         name=encoder_service.encoder_name,
-        url=base_url,
-        model_info=model_info,
+        model_info=config.EMBEDDING_MODEL,  
         status="operational"
     )
 
@@ -297,9 +279,9 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         # Добавляем префикс в зависимости от укзанного типа запроса
         if request.request_type:
             if request.request_type == "query":
-                cleaned_text = config.EMBEDDING_MODEL.get("query_prefix", "search_query: ") + cleaned_text
+                cleaned_text = config.EMBEDDING_MODEL.query_prefix + cleaned_text
             elif request.request_type == "document":
-                cleaned_text = config.EMBEDDING_MODEL.get("document_prefix", "search_document: ") + cleaned_text
+                cleaned_text = config.EMBEDDING_MODEL.document_prefix + cleaned_text
         
         # СИНХРОННЫЙ вызов модели
         # FastAPI гарантирует, что в этот момент модель не используется другими запросами
@@ -344,9 +326,9 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         prefix = None
         if request.request_type:
             if request.request_type == "query":
-                prefix = config.EMBEDDING_MODEL.get("query_prefix", "search_query: ")
+                prefix = config.EMBEDDING_MODEL.query_prefix
             elif request.request_type == "document":
-                prefix = config.EMBEDDING_MODEL.get("document_prefix", "search_document: ")
+                prefix = config.EMBEDDING_MODEL.document_prefix
         
         # Очищаем все тексты и добавляем префикс (если нужен)
         if prefix:
@@ -381,14 +363,14 @@ def get_vector_size():
     """
     Возвращает длину вектора в используемой модели
     """
-    return {"vector_size": config.EMBEDDING_MODEL.get("vector_size", 0)}
+    return {"vector_size": config.EMBEDDING_MODEL.vector_size}
 
 @app.get("/max_length")
 def get_max_length():
     """
     Возвращает максимальную длину текста (в токенах)
     """
-    return {"max_length": config.EMBEDDING_MODEL.get("max_seq_length", 0)}
+    return {"max_length": config.EMBEDDING_MODEL.max_seq_length}
 
 @app.get("/health")
 async def health_check():

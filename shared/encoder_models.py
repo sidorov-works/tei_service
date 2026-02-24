@@ -5,7 +5,7 @@ Pydantic модели для работы с Encoder Service.
 Содержит модели для описания энкодера и его свойств.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 
@@ -43,17 +43,12 @@ class EncoderInfo(BaseModel):
     """
     Полное описание экземпляра Encoder Service для клиента.
     
-    Содержит всю информацию, необходимую клиенту для работы с конкретным энкодером:
-    - Имя энкодера (для идентификации в запросах)
-    - URL для доступа к сервису
-    - Информация о модели этого энкодера
+    ВАЖНО: Сервис НЕ знает свой URL - это ответственность клиента.
+    URL добавляется клиентом при создании EncoderClient.
     """
     
     # Уникальное имя энкодера (например: "rag", "classifier", "multilingual")
     name: str
-    
-    # Базовый URL для доступа к сервису энкодера (например: "http://encoder-rag:8260")
-    url: str
     
     # Информация о модели, используемой в этом энкодере
     model_info: EncoderModelInfo

@@ -51,7 +51,6 @@ curl http://localhost:8001/info
 ```json
 {
     "name": "rag",
-    "url": "http://localhost:8001",
     "model_info": {
         "name": "deepvk/USER2-base",
         "vector_size": 768,
@@ -148,14 +147,12 @@ class EncoderModelInfo(BaseModel):
 | Поле | Тип | Описание | Пример |
 |------|-----|----------|--------|
 | `name` | str | Уникальное имя энкодера | "rag" |
-| `url` | str | Базовый URL для доступа к сервису | "http://encoder-rag:8260" |
 | `model_info` | EncoderModelInfo | Информация о модели | см. выше |
 | `status` | str | Статус сервиса | "operational" |
 
 ```python
 class EncoderInfo(BaseModel):
     name: str
-    url: str
     model_info: EncoderModelInfo
     status: str = "operational"
     
@@ -218,9 +215,6 @@ python -m shared.utils.download_models
 ENCODER_NAME=rag                      # Уникальное имя этого энкодера
 INTERNAL_API_SECRET=your-secret-key
 DEVICE=cpu                            # или "mps" для Mac, "cuda" для NVIDIA
-ENCODER_SERVICE_URL=http://localhost:8001
-ENCODE_TIMEOUT=30.0
-ENCODE_BATCH_TIMEOUT=60.0
 ```
 
 #### Запуск сервиса
@@ -282,29 +276,34 @@ services:
 
 ### Конфигурация
 
-Каждый экземпляр энкодера запускается со своим `.env` файлом:
+Конфигурация сервиса задается через файл `.env` и код в `shared/config.py`. Основные параметры:
 
-**Пример .env для GPU:**
-```env
-ENCODER_NAME=rag
-DEVICE=cuda
-INTERNAL_API_SECRET=your-secret-key
-ENCODER_SERVICE_URL=http://encoder_service:8260
-ENCODE_TIMEOUT=30.0
-ENCODE_BATCH_TIMEOUT=60.0
-EMBEDDING_MODEL={"model": "deepvk/USER2-base", "vector_size": 768, "max_seq_length": 8192}
+```python
+# Пример конфигурации для RAG модели
+EMBEDDING_MODEL = EncoderModelInfo(
+    name="deepvk/USER2-base",
+    vector_size=768,
+    max_seq_length=8192,
+    query_prefix="search_query: ",
+    document_prefix="search_document: "
+)
+
+# Пример конфигурации для классификации
+EMBEDDING_MODEL = EncoderModelInfo(
+    name="ai-forever/FRIDA",
+    vector_size=768,
+    max_seq_length=512,
+    query_prefix="search_query: ",
+    document_prefix="search_document: "
+)
 ```
 
-**Пример .env для CPU:**
-```env
-ENCODER_NAME=classifier
-DEVICE=cpu
-INTERNAL_API_SECRET=your-secret-key
-ENCODER_SERVICE_URL=http://localhost:8001
-ENCODE_TIMEOUT=30.0
-ENCODE_BATCH_TIMEOUT=60.0
-EMBEDDING_MODEL={"model": "ai-forever/FRIDA", "vector_size": 768, "max_seq_length": 512}
-```
+Параметры окружения (`.env`):
+- `ENCODER_NAME` - уникальное имя экземпляра энкодера
+- `INTERNAL_API_SECRET` - секретный ключ для аутентификации
+- `DEVICE` - устройство для вычислений (`cpu`, `cuda`, `mps`)
+
+Модели сохраняются в директорию `models/sentence-transformers/`.
 
 ### Обработка ошибок
 
