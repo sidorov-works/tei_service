@@ -34,7 +34,7 @@ class DefaultConfig:
     # Описание и свойства эмбеддинговой модели для кластеризации/классификации обращений
     EMBEDDING_MODEL = EncoderModelInfo(
         name="ai-forever/FRIDA", # название модели на Hugging Face Hub
-        vector_size=768,
+        vector_size=1536,
         max_seq_length=512,
         query_prefix="search_query: ",
         document_prefix="search_document: "
