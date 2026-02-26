@@ -9,6 +9,7 @@
 - [Потокобезопасность](#потокобезопасность)
 - [Установка и запуск](#установка-и-запуск)
 - [Запуск в Docker](#запуск-в-docker)
+- [Запуск нескольких экземпляров](#запуск-нескольких-экземпляров)
 - [Конфигурация](#конфигурация)
 - [Обработка ошибок](#обработка-ошибок)
 - [Мониторинг](#мониторинг)
@@ -224,7 +225,7 @@ uvicorn encoder_service.main:app --host 0.0.0.0 --port 8001 --workers 1
 
 ### Запуск в Docker
 
-#### Dockerfile
+#### Базовый Dockerfile
 ```dockerfile
 FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
@@ -245,7 +246,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://127.0.0.1:8260/health || exit 1
 ```
 
-#### docker-compose.yml
+#### docker-compose.yml для одного экземпляра
 ```yaml
 services:
   encoder_service:
@@ -274,6 +275,220 @@ services:
               capabilities: [gpu]
 ```
 
+### Запуск нескольких экземпляров
+
+Для ситуаций, когда нужно одновременно запустить несколько копий сервиса с разными моделями (например, для тестирования, поддержки разных языков или разделения нагрузки), используется двухуровневая система образов.
+
+#### Как это работает
+
+1. **Базовый слой** — один раз устанавливается всё тяжелое окружение (Python, пакеты, CUDA-библиотеки)
+2. **Слой экземпляра** — легкая надстройка для каждой копии с кодом и настройками
+
+```
+┌─────────────────────┐      ┌─────────────────────┐
+│  Экземпляр 1        │      │  Экземпляр 2        │
+│  ┌─────────────────┐│      │  ┌─────────────────┐│
+│  │ Код + .env1     ││      │  │ Код + .env2     ││
+│  └─────────────────┘│      │  └─────────────────┘│
+│  ┌─────────────────┐│      │  ┌─────────────────┐│
+│  │   Базовый слой  ││      │  │   Базовый слой  ││
+│  │  (общий для всех)││      │  │  (общий для всех)││
+│  └─────────────────┘│      │  └─────────────────┘│
+└─────────────────────┘      └─────────────────────┘
+```
+
+#### Структура папок для нескольких экземпляров
+
+```
+encoder-service/
+│
+├── dockerfile.base           # для базового образа
+├── dockerfile.service        # для экземпляров
+├── requirements.windows.txt  # общие зависимости
+│
+├── encoder_service/           # код сервиса
+├── shared/                    # общие модули
+│
+├── .env.encoder1              # настройки экземпляра 1
+├── .env.encoder2              # настройки экземпляра 2
+│
+├── models/
+│   ├── encoder1/              # модель экземпляра 1
+│   └── encoder2/              # модель экземпляра 2
+│
+├── logs/
+│   ├── encoder1/              # логи экземпляра 1
+│   └── encoder2/              # логи экземпляра 2
+│
+└── docker-compose.yml         # запуск всех экземпляров
+```
+
+#### Базовый образ (dockerfile.base)
+
+```dockerfile
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    curl libopenblas-dev gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.windows.txt .
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.windows.txt
+
+ENV PYTHONUNBUFFERED=1 \
+    OMP_NUM_THREADS=1 \
+    TOKENIZERS_PARALLELISM=false
+```
+
+Сборка базового образа (делается один раз):
+```bash
+docker build -t encoder-base:latest -f dockerfile.base .
+```
+
+#### Образ для экземпляров (dockerfile.service)
+
+```dockerfile
+FROM encoder-base:latest
+
+COPY . .
+
+RUN mkdir -p logs models && \
+    useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://127.0.0.1:${PORT:-8260}/health || exit 1
+```
+
+#### Файлы .env для каждого экземпляра
+
+**.env.encoder1** (модель deepvk/USER2-base):
+```env
+ENCODER_NAME=encoder1
+INTERNAL_API_SECRET=secret-key-1
+DEVICE=cuda
+HUGGING_FACE_MODEL_NAME=deepvk/USER2-base
+VECTOR_SIZE=768
+MAX_SEQ_LENGTH=8192
+QUERY_PREFIX=search_query:
+DOCUMENT_PREFIX=search_document:
+PORT=8260
+```
+
+**.env.encoder2** (модель ai-forever/FRIDA):
+```env
+ENCODER_NAME=encoder2
+INTERNAL_API_SECRET=secret-key-2
+DEVICE=cuda
+HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
+VECTOR_SIZE=1536
+MAX_SEQ_LENGTH=512
+QUERY_PREFIX=search_query:
+DOCUMENT_PREFIX=search_document:
+PORT=8261
+```
+
+#### Docker Compose для нескольких экземпляров
+
+```yaml
+services:
+  # Первый экземпляр
+  encoder1:
+    build:
+      context: .
+      dockerfile: dockerfile.service
+    ports:
+      - "8260:8260"
+    volumes:
+      - ./models/encoder1:/app/models
+      - ./logs/encoder1:/app/logs
+    env_file:
+      - .env.encoder1
+    environment:
+      - PORT=8260
+    restart: unless-stopped
+    command: >
+      uvicorn encoder_service.main:app
+      --port 8260 --host 0.0.0.0 --workers 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Второй экземпляр
+  encoder2:
+    build:
+      context: .
+      dockerfile: dockerfile.service
+    ports:
+      - "8261:8261"
+    volumes:
+      - ./models/encoder2:/app/models
+      - ./logs/encoder2:/app/logs
+    env_file:
+      - .env.encoder2
+    environment:
+      - PORT=8261
+    restart: unless-stopped
+    command: >
+      uvicorn encoder_service.main:app
+      --port 8261 --host 0.0.0.0 --workers 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+#### Команды для работы с несколькими экземплярами
+
+**Сборка базового образа:**
+```bash
+docker build -t encoder-base:latest -f dockerfile.base .
+```
+
+**Запуск всех экземпляров:**
+```bash
+docker-compose up -d
+```
+
+**Проверка работы:**
+```bash
+curl http://localhost:8260/info
+curl http://localhost:8261/info
+```
+
+**Просмотр логов конкретного экземпляра:**
+```bash
+docker-compose logs -f encoder1
+```
+
+**Остановка всех:**
+```bash
+docker-compose down
+```
+
+#### Важные замечания при запуске нескольких экземпляров
+
+1. **Память GPU** — если видеокарта одна, модели делят её память. Убедитесь, что обе модели помещаются одновременно.
+
+2. **Отдельные папки** — всегда используйте разные папки для моделей (`models/encoder1`, `models/encoder2`), чтобы избежать конфликтов.
+
+3. **Разные порты** — каждый экземпляр должен слушать свой уникальный порт.
+
+4. **Первый запуск** — при первом запуске каждый экземпляр скачает свою модель (это может занять время и место).
+
+5. **Ресурсы CPU/RAM** — учитывайте, что каждый экземпляр потребляет оперативную память под свою модель.
+
 ### Конфигурация
 
 Конфигурация сервиса задается через файл `.env` и код в `shared/config.py`. Основные параметры:
@@ -290,8 +505,7 @@ class DefaultConfig:
     LOG_PATH = Path("logs")
     MODEL_PATH = Path("models") / "sentence-transformers"
 
-    # это тоже в коде нужно переделать
-    DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"
+    DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"/"mps"
 
     # Описание и свойства эмбеддинговой модели
     EMBEDDING_MODEL = EncoderModelInfo(
@@ -310,8 +524,8 @@ class DefaultConfig:
 - `HUGGING_FACE_MODEL_NAME` - название модели на Hugging Face Hub
 - `VECTOR_SIZE` - размер вектора модели
 - `MAX_SEQ_LENGTH` - максимальная длина входного текста (в токенах)
-- `QUERY_PREFIX`
-- `DOCUMENT_PREFIX`
+- `QUERY_PREFIX` - префикс для поисковых запросов
+- `DOCUMENT_PREFIX` - префикс для документов
 
 Модели сохраняются в директорию `models/sentence-transformers/`.
 
