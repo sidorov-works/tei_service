@@ -35,6 +35,16 @@ class BatchEncodeRequest(BaseModel):
     request_type: Optional[str] = "query"
 
 
+class BatchTokenCountRequest(BaseModel):
+    """Для батчевого подсчета количества токенов в текстах"""
+    texts: List[str]
+
+class BatchTokenCountResponse(BaseModel):
+    """Ответ с длинами всех текстов в батче"""
+    tokens_counts: List[int]  # список длин текстов
+    service_available: bool
+
+
 async def verify_internal(request: Request):
     """
     Проверка (по секретному заголовку), 
@@ -386,22 +396,6 @@ async def health_check():
         "service_available": encoder_service.service_available
     }
 
-# @app.get("/status")
-# async def status():
-#     """
-#     Детальный статус сервиса.
-    
-#     Можно оставить async, не использует модель.
-#     """
-#     return {
-#         "service": "Encoder Service",
-#         "status": "operational" if encoder_service.service_available else "degraded",
-#         "encoder_loaded": encoder_service.encoder is not None,
-#         "model": config.EMBEDDING_MODEL.get("model", "unknown"),
-#         "device": config.EMBEDDING_MODEL.get("device", "cpu"),
-#         "note": "All encode endpoints are synchronous for thread safety"
-#     }
-
 @app.post("/count_tokens")
 def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
@@ -427,5 +421,63 @@ def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
         logger.error(f"Count_tokens endpoint error: {e}")
         return {
             "error": str(e),
+            "service_available": encoder_service.service_available
+        }
+
+
+@app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
+def count_tokens_batch_sync(
+    request: BatchTokenCountRequest, 
+    _: None = Depends(verify_internal)
+):
+    """
+    СИНХРОННЫЙ подсчет токенов для нескольких текстов за один запрос.
+    
+    Возвращает СПИСОК длин для каждого текста в том же порядке.
+    
+    Пример запроса:
+    {
+        "texts": ["короткий текст", "очень длинный текст с множеством слов и предложений"]
+    }
+    
+    Пример ответа:
+    {
+        "tokens_counts": [3, 15],  # ← первый текст - 3 токена, второй - 15 токенов
+        "count": 2,
+        "service_available": true
+    }
+    """
+    try:
+        if not encoder_service.service_available:
+            return {
+                "tokens_counts": [],  # пустой список при ошибке
+                "count": 0,
+                "service_available": False
+            }
+        
+        token_counts = []
+        
+        # Для КАЖДОГО текста считаем токены и добавляем в список
+        for text in request.texts:
+            tokens = encoder_service.tokenizer.encode(
+                text,
+                add_special_tokens=True,
+                truncation=True
+            )
+            token_counts.append(len(tokens))  # ← добавляем длину в список
+        
+        logger.info(f"Batch token count: processed {len(request.texts)} texts")
+        
+        return {
+            "tokens_counts": token_counts, 
+            "count": len(token_counts),
+            "service_available": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Count_tokens_batch endpoint error: {e}")
+        return {
+            "tokens_counts": [],
+            "count": 0,
             "service_available": encoder_service.service_available
         }
