@@ -1,14 +1,22 @@
 services:
-  encoder_service:
+  # Первый экземпляр
+  encoder1:
     build:
       context: .
-      dockerfile: dockerfile.windows
+      dockerfile: dockerfile.service
     ports:
       - "8260:8260"
     volumes:
+      # Общая папка для моделей
       - ./models:/app/models
+      # Отдельная папка для логов первого сервиса
+      - ./logs/encoder1:/app/logs
     env_file:
-      - .env
+      - .env.encoder1
+    environment:
+      - PORT=8260
+      - DOCKER_ENV=false  # используем файловый логгер
+    container_name: encoder_service_1
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
@@ -18,7 +26,41 @@ services:
     shm_size: '2gb'
     mem_limit: 8g
     cpus: '4.0'
-    # ✅ Ключевое: резервируем GPU для Windows[citation:1]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Второй экземпляр
+  encoder2:
+    build:
+      context: .
+      dockerfile: dockerfile.service
+    ports:
+      - "8261:8261"
+    volumes:
+      # Та же общая папка для моделей
+      - ./models:/app/models
+      # Отдельная папка для логов второго сервиса
+      - ./logs/encoder2:/app/logs
+    env_file:
+      - .env.encoder2
+    environment:
+      - PORT=8261
+      - DOCKER_ENV=false
+    container_name: encoder_service_2
+    restart: unless-stopped
+    command: >
+      uvicorn encoder_service.main:app
+      --port 8261 --host 0.0.0.0 --workers 1
+      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
+    init: true
+    shm_size: '2gb'
+    mem_limit: 8g
+    cpus: '4.0'
     deploy:
       resources:
         reservations:

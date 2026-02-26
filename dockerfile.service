@@ -1,0 +1,11 @@
+FROM encoder-base:latest
+
+COPY . .
+
+RUN mkdir -p logs models && \
+    useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://127.0.0.1:${PORT:-8260}/health || exit 1
