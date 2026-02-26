@@ -279,29 +279,39 @@ services:
 Конфигурация сервиса задается через файл `.env` и код в `shared/config.py`. Основные параметры:
 
 ```python
-# Пример конфигурации для RAG модели
-EMBEDDING_MODEL = EncoderModelInfo(
-    name="deepvk/USER2-base",
-    vector_size=768,
-    max_seq_length=8192,
-    query_prefix="search_query: ",
-    document_prefix="search_document: "
-)
+class DefaultConfig:
 
-# Пример конфигурации для классификации
-EMBEDDING_MODEL = EncoderModelInfo(
-    name="ai-forever/FRIDA",
-    vector_size=768,
-    max_seq_length=512,
-    query_prefix="search_query: ",
-    document_prefix="search_document: "
-)
+    ENCODER_NAME = os.getenv("ENCODER_NAME", "frida")
+    
+    INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+
+    EXC_INFO = False # выводить ли в лог весь stacktrace
+
+    LOG_PATH = Path("logs")
+    MODEL_PATH = Path("models") / "sentence-transformers"
+
+    # это тоже в коде нужно переделать
+    DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"
+
+    # Описание и свойства эмбеддинговой модели
+    EMBEDDING_MODEL = EncoderModelInfo(
+        name=os.getenv("HUGGING_FACE_MODEL_NAME", "ai-forever/FRIDA"), 
+        vector_size=int(os.getenv("VECTOR_SIZE", "1536")),
+        max_seq_length=int(os.getenv("MAX_SEQ_LENGTH", "512")),
+        query_prefix=os.getenv("QUERY_PREFIX", "search_query: "),
+        document_prefix=os.getenv("DOCUMENT_PREFIX", "search_document: ")
+    )
 ```
 
 Параметры окружения (`.env`):
 - `ENCODER_NAME` - уникальное имя экземпляра энкодера
 - `INTERNAL_API_SECRET` - секретный ключ для аутентификации
 - `DEVICE` - устройство для вычислений (`cpu`, `cuda`, `mps`)
+- `HUGGING_FACE_MODEL_NAME` - название модели на Hugging Face Hub
+- `VECTOR_SIZE` - размер вектора модели
+- `MAX_SEQ_LENGTH` - максимальная длина входного текста (в токенах)
+- `QUERY_PREFIX`
+- `DOCUMENT_PREFIX`
 
 Модели сохраняются в директорию `models/sentence-transformers/`.
 
