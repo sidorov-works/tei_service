@@ -37,7 +37,8 @@
 | `/info` | GET | Информация об энкодере и его модели | Нет |
 | `/encode` | POST | Кодирование одного текста | Да |
 | `/encode_batch` | POST | Пакетное кодирование нескольких текстов | Да |
-| `/count_tokens` | POST | Подсчет токенов в тексте | Да |
+| `/count_tokens` | POST | Подсчет токенов в одном тексте | Да |
+| **`/count_tokens_batch`** | **POST** | **Подсчет токенов для нескольких текстов за один запрос** | **Да** |
 | `/vector_size` | GET | Размерность вектора модели | Да |
 | `/max_length` | GET | Максимальная длина текста в токенах | Да |
 | `/health` | GET | Проверка здоровья сервиса | Нет |
@@ -97,6 +98,30 @@ curl -X POST http://localhost:8001/encode_batch \
     "service_available": true
 }
 ```
+
+#### Пакетный подсчет токенов (`/count_tokens_batch`) 🚀
+
+**Новый эндпоинт для эффективной обработки множества текстов.**
+
+Позволяет подсчитать количество токенов для нескольких текстов за один запрос. Это критически важно для производительности при индексации больших документов: например, для 121 чанка с 2 энкодерами заменяет 242 отдельных запроса на всего 2.
+
+```bash
+curl -X POST http://localhost:8001/count_tokens_batch \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Secret: your-secret-key" \
+  -d '{"texts": ["короткий текст", "очень длинный текст с множеством слов и предложений"]}'
+```
+
+**Пример ответа:**
+```json
+{
+    "tokens_counts": [3, 15],        # Длины в том же порядке, что и входные тексты
+    "count": 2,
+    "service_available": true
+}
+```
+
+**Важно:** Эндпоинт синхронный, как и все остальные работающие с моделью. FastAPI ставит запросы в очередь, гарантируя безопасность.
 
 #### Проверка здоровья (`/health`)
 
@@ -180,6 +205,22 @@ class BatchEncodeRequest(BaseModel):
     request_type: Optional[str] = "query"  # "query" или "document"
 ```
 
+##### BatchTokenCountRequest
+
+```python
+class BatchTokenCountRequest(BaseModel):
+    texts: List[str]  # Список текстов для подсчета токенов
+```
+
+##### BatchTokenCountResponse
+
+```python
+class BatchTokenCountResponse(BaseModel):
+    tokens_counts: List[int]  # Длины текстов в том же порядке
+    count: int                 # Количество обработанных текстов
+    service_available: bool    # Статус сервиса
+```
+
 ### Потокобезопасность
 
 **Критически важно:** SentenceTransformer модели не являются потокобезопасными. Параллельные вызовы `encoder.encode()` из разных потоков могут привести к segmentation fault.
@@ -194,6 +235,8 @@ class BatchEncodeRequest(BaseModel):
 2. Второй запрос → FastAPI ставит в очередь
 3. Завершение обработки первого запроса → отправка ответа
 4. Начало обработки второго запроса → отправка ответа
+
+**Batch-эндпоинты** (`/encode_batch` и `/count_tokens_batch`) следуют тому же принципу: внутри одного запроса тексты обрабатываются последовательно, а сам запрос стоит в очереди FastAPI.
 
 ### Установка и запуск
 
@@ -594,11 +637,12 @@ logger = get_logger("my_app")
 - Включение имени процесса в каждый лог
 - В контейнерах с `DOCKER_ENV=false` логи пишутся в `/app/logs/app.log` и пробрасываются на хост через volumes
 
-**Пример логов:**
+**Пример логов с batch-обработкой:**
 ```
 2024-01-01 12:00:00 | INFO     | encoder1     | Starting encoder instance: encoder1
 2024-01-01 12:00:01 | INFO     | encoder1     | Модель успешно загружена: deepvk/USER2-base
 2024-01-01 12:00:02 | INFO     | encoder1     | Processing batch: 5 texts
+2024-01-01 12:00:05 | INFO     | encoder1     | Batch token count: 121 texts processed
 ```
 
 ### Обработка ошибок
@@ -612,6 +656,15 @@ logger = get_logger("my_app")
 ```json
 {
     "error": "Encoder service not available",
+    "service_available": false
+}
+```
+
+Для batch-эндпоинтов при ошибке возвращается пустой список:
+```json
+{
+    "tokens_counts": [],
+    "count": 0,
     "service_available": false
 }
 ```
@@ -637,10 +690,16 @@ tail -f logs/encoder1/app.log
 ### Производительность
 
 - **Батчевая обработка** — модель эффективно обрабатывает до 32 текстов за один запрос
+- **Пакетный подсчет токенов** — позволяет обрабатывать сотни текстов за 2-3 запроса вместо сотен отдельных
 - **Кэширование моделей** — модели сохраняются в `models/sentence-transformers/` и переиспользуются
 - **Общий кэш для нескольких экземпляров** — при запуске нескольких сервисов модели скачиваются один раз
 - **Очистка памяти** — при завершении работы освобождаются ресурсы GPU/MPS
 - **Таймауты** — настраиваемые таймауты для разных типов запросов
+
+**Пример эффективности:**
+- Для индексации документа со 121 чанком и 2 энкодерами:
+  - Без batch: 242 запроса `/count_tokens`
+  - С batch: 2 запроса `/count_tokens_batch`
 
 ### Безопасность
 
@@ -689,6 +748,14 @@ ls -la models/sentence-transformers/
 watch -n 1 nvidia-smi
 ```
 
+**Тестирование batch-эндпоинта:**
+```bash
+curl -X POST http://localhost:8260/count_tokens_batch \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Secret: your-secret-key" \
+  -d '{"texts": ["текст 1", "текст 2", "текст 3"]}'
+```
+
 **Очистка кэша моделей (если нужно перекачать):**
 ```bash
 # Удалить конкретную модель
@@ -703,3 +770,5 @@ rm -rf models/sentence-transformers/deepvk%2FUSER2-base/
 | Out of memory на GPU | Уменьшите batch size, используйте `count: 1` в deploy.resources |
 | Конфликт портов | Измените PORT в .env файлах |
 | Нет логов в папке | Проверьте `DOCKER_ENV=false`, права на папку logs |
+| **Слишком много запросов `/count_tokens`** | **Используйте новый `/count_tokens_batch` эндпоинт** |
+| **ConnectionTerminated ошибки** | **Переключитесь на batch-эндпоинты, уменьшите количество запросов** |
