@@ -11,7 +11,7 @@ load_dotenv(override=True)
 
 class DefaultConfig:
 
-    ENCODER_NAME = os.getenv("ENCODER_NAME", "default")
+    ENCODER_NAME = os.getenv("ENCODER_NAME", "frida")
     
     INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 
@@ -23,21 +23,13 @@ class DefaultConfig:
     # это тоже в коде нужно переделать
     DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"
 
-    # EMBEDDING_MODEL = EncoderModelInfo(
-    #     name="deepvk/USER2-base",
-    #     vector_size=768,
-    #     max_seq_length=8192,
-    #     query_prefix="search_query: ",
-    #     document_prefix="search_document: "
-    # )
-
-    # Описание и свойства эмбеддинговой модели для кластеризации/классификации обращений
+    # Описание и свойства эмбеддинговой модели
     EMBEDDING_MODEL = EncoderModelInfo(
-        name="ai-forever/FRIDA", # название модели на Hugging Face Hub
-        vector_size=1536,
-        max_seq_length=512,
-        query_prefix="search_query: ",
-        document_prefix="search_document: "
+        name=os.getenv("HUGGING_FACE_MODEL_NAME", "ai-forever/FRIDA"), 
+        vector_size=int(os.getenv("VECTOR_SIZE", "1536")),
+        max_seq_length=int(os.getenv("MAX_SEQ_LENGTH", "512")),
+        query_prefix=os.getenv("QUERY_PREFIX", "search_query: "),
+        document_prefix=os.getenv("DOCUMENT_PREFIX", "search_document: ")
     )
 
 # Глобальный инстанс конфига для импорта. 
