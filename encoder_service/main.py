@@ -73,17 +73,13 @@ class EncoderService:
         self.encoder = None   # Модель SentenceTransformer
         self.tokenizer = None # Отдельный объект токенизатора
         self.service_available = False  # Флаг доступности сервиса
-        self.encoder_name = ""   # позже подтянем из конфига (чтобы наверняка)
+        self.encoder_info: Optional[EncoderInfo] = None # Заполним, когда загрузим модель
 
     async def connect(self) -> bool:
         """Инициализация сервиса - загрузка модели эмбеддингов"""
         try:
-            model_info = config.EMBEDDING_MODEL  # теперь это EncoderModelInfo, не dict
-            model_id = model_info.name  # вместо model_data['model']
-            
+            model_id = config.HUGGING_FACE_MODEL_NAME
             model_path: Path = config.MODEL_PATH / model_id
-
-            self.encoder_name = config.ENCODER_NAME
             
             # 1. Проверяем и скачиваем SentenceTransformer модель, если её нет
             if not model_path.exists():
@@ -135,20 +131,26 @@ class EncoderService:
             if self.tokenizer is None:
                 logger.error("Не удалось загрузить токенизатор")
                 return False
-                
-            self.service_available = True
-            logger.info(f"Модель энкодера успешно загружена: {model_info.name}")
-            logger.info(f"Размер вектора: {model_info.vector_size}")
-            logger.info(f"Max sequence length: {model_info.max_seq_length}")
             
-            # 5. Проверяем соответствие max_seq_length
-            if hasattr(self.encoder, 'max_seq_length'):
-                if self.encoder.max_seq_length != model_info.max_seq_length:
-                    logger.warning(
-                        f"Модель имеет max_seq_length={self.encoder.max_seq_length}, "
-                        f"но в конфиге указано {model_info.max_seq_length}. "
-                        f"Используется значение модели."
-                    )
+            # 5. Получаем реальные значения параметров из модели
+            actual_vector_size = self.encoder.get_sentence_embedding_dimension()
+            actual_max_length = self.encoder.max_seq_length
+            
+            self.encoder_info = EncoderInfo(
+                name=config.ENCODER_NAME,
+                model_info=EncoderModelInfo(
+                    name=config.HUGGING_FACE_MODEL_NAME,
+                    vector_size=actual_vector_size,
+                    max_seq_length=actual_max_length,
+                    query_prefix=config.QUERY_PREFIX,
+                    document_prefix=config.DOCUMENT_PREFIX
+                )
+            )
+
+            self.service_available = True
+            logger.info(f"Модель энкодера успешно загружена: {self.encoder_info.model_info.name}")
+            logger.info(f"Размер вектора: {self.encoder_info.model_info.vector_size}")
+            logger.info(f"Max sequence length: {self.encoder_info.model_info.max_seq_length}")
             
             return True
             
@@ -229,7 +231,6 @@ def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
             cleaned_embedding.append(x)
     return cleaned_embedding
 
-
 @app.get("/info", response_model=EncoderInfo)
 async def get_encoder_info(request: Request):
     """
@@ -242,25 +243,22 @@ async def get_encoder_info(request: Request):
     Returns:
         EncoderInfo: Информация об энкодере и его модели
     """
-    if not encoder_service.service_available:
-        # Возвращаем минимальную информацию, если сервис не готов
+    if not encoder_service.service_available or not encoder_service.encoder_info:
+        # Используем fallback с именем из конфига
         return EncoderInfo(
-            name=encoder_service.encoder_name,
+            name=config.ENCODER_NAME,  # берем из config, а не из сервиса
             model_info=EncoderModelInfo(
-                name="unknown",
-                vector_size=0,
-                max_seq_length=0,
-                query_prefix="",
-                document_prefix=""
+                name=config.HUGGING_FACE_MODEL_NAME,
+                vector_size=None,
+                max_seq_length=None,
+                query_prefix=config.QUERY_PREFIX,
+                document_prefix=config.DOCUMENT_PREFIX
             ),
             status="degraded"
         )
     
-    return EncoderInfo(
-        name=encoder_service.encoder_name,
-        model_info=config.EMBEDDING_MODEL,  
-        status="operational"
-    )
+    # Возвращаем encoder_info
+    return encoder_service.encoder_info
 
 @app.post("/encode")
 def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
@@ -289,9 +287,9 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         # Добавляем префикс в зависимости от укзанного типа запроса
         if request.request_type:
             if request.request_type == "query":
-                cleaned_text = config.EMBEDDING_MODEL.query_prefix + cleaned_text
+                cleaned_text = config.QUERY_PREFIX + cleaned_text
             elif request.request_type == "document":
-                cleaned_text = config.EMBEDDING_MODEL.document_prefix + cleaned_text
+                cleaned_text = config.DOCUMENT_PREFIX + cleaned_text
         
         # СИНХРОННЫЙ вызов модели
         # FastAPI гарантирует, что в этот момент модель не используется другими запросами
@@ -336,9 +334,9 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         prefix = None
         if request.request_type:
             if request.request_type == "query":
-                prefix = config.EMBEDDING_MODEL.query_prefix
+                prefix = config.QUERY_PREFIX
             elif request.request_type == "document":
-                prefix = config.EMBEDDING_MODEL.document_prefix
+                prefix = config.DOCUMENT_PREFIX
         
         # Очищаем все тексты и добавляем префикс (если нужен)
         if prefix:
@@ -373,14 +371,14 @@ def get_vector_size():
     """
     Возвращает длину вектора в используемой модели
     """
-    return {"vector_size": config.EMBEDDING_MODEL.vector_size}
+    return {"vector_size": encoder_service.encoder_info.model_info.vector_size}
 
 @app.get("/max_length")
 def get_max_length():
     """
     Возвращает максимальную длину текста (в токенах)
     """
-    return {"max_length": config.EMBEDDING_MODEL.max_seq_length}
+    return {"max_length": encoder_service.encoder_info.model_info.max_seq_length}
 
 @app.get("/health")
 async def health_check():

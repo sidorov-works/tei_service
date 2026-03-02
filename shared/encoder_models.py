@@ -22,10 +22,10 @@ class EncoderModelInfo(BaseModel):
     name: str
     
     # Размерность выходного вектора (например: 768)
-    vector_size: int
+    vector_size: Optional[int] = None
     
     # Максимальная длина текста в токенах (например: 8192 для длинноконтекстных моделей)
-    max_seq_length: int
+    max_seq_length: Optional[int] = None
     
     # Префикс, добавляемый к поисковым запросам (query)
     # Может быть пустой строкой, если модель не требует префиксов
@@ -34,9 +34,6 @@ class EncoderModelInfo(BaseModel):
     # Префикс, добавляемый к документам при индексации
     # Может быть пустой строкой, если модель не требует префиксов
     document_prefix: str = ""
-    
-    class Config:
-        frozen = True  # Модель неизменяема после создания
 
 
 class EncoderInfo(BaseModel):
@@ -55,6 +52,3 @@ class EncoderInfo(BaseModel):
     
     # Статус сервиса (опционально, для информации)
     status: str = "operational"
-    
-    class Config:
-        frozen = True  # Неизменяем после создания
