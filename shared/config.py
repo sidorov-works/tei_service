@@ -43,6 +43,12 @@ class DefaultConfig:
     # Максимально допустимая суммарная длина текстов в батче
     MAX_TOTAL_BATCH_LENGTH = int(os.getenv("MAX_TOTAL_BATCH_LENGTH", "100000"))
 
+    # Rate limiting и защита от Ddos ---------------------------------------------------------
+    RATE_LIMIT_INFO = os.getenv("RATE_LIMIT_INFO", "500/minute")                
+    RATE_LIMIT_ENCODE = os.getenv("RATE_LIMIT_ENCODE", "200/minute")            
+    RATE_LIMIT_ENCODE_BATCH = os.getenv("RATE_LIMIT_ENCODE_BATCH", "60/minute") 
+    RATE_LIMIT_COUNT_TOKENS = os.getenv("RATE_LIMIT_COUNT_TOKENS", "200/minute")      
+    RATE_LIMIT_COUNT_TOKENS_BATCH = os.getenv("RATE_LIMIT_COUNT_TOKENS_BATCH", "60/minute")
 
     # Настройки логирования и отладки ---------------------------------------------------------
     EXC_INFO = False # выводить ли в лог весь stacktrace

@@ -56,61 +56,42 @@ class BatchEncodeRequest(BaseModel):
     """
     texts: List[str]
     request_type: Optional[str] = "query"  # "query" или "document"
-    
+
     @field_validator('texts')
     @classmethod
-    def validate_batch_size(cls, v: List[str]) -> List[str]:
-        """
-        Уровень 1: Проверка количества текстов в батче.
-        Не допускает пустые батчи и батчи больше MAX_BATCH_SIZE.
-        """
+    def validate(cls, v: List[str]) -> List[str]:
         # Проверка на пустой батч
         if not v:
             raise ValueError('Batch cannot be empty')
         
-        # Проверка максимального размера батча
+        # Проверка максимального размера батча (количества текстов в батче)
         if len(v) > config.MAX_BATCH_SIZE:
             raise ValueError(
                 f'Batch size ({len(v)} texts) exceeds maximum allowed '
                 f'({config.MAX_BATCH_SIZE} texts)'
             )
         
-        return v
-    
-    @field_validator('texts')
-    @classmethod
-    def validate_text_length(cls, v: List[str]) -> List[str]:
-        """
-        Уровень 2: Проверка длины каждого отдельного текста.
-        Ни один текст не должен превышать MAX_TEXT_LENGTH.
-        """
+        # Проверка длины отдельных текстов и общей длины текстов
+        total_len = 0
         for i, text in enumerate(v):
-            if len(text) > config.MAX_TEXT_LENGTH:
+            text_len = len(text.strip())
+            if text_len == 0:
                 raise ValueError(
-                    f'Text at index {i} length ({len(text)} chars) exceeds maximum allowed '
+                    f'Text at index {i} is empty'
+                )
+            if text_len > config.MAX_TEXT_LENGTH:
+                raise ValueError(
+                    f'Text at index {i} length ({text_len} chars) exceeds maximum allowed '
                     f'({config.MAX_TEXT_LENGTH} chars)'
+                )
+            total_len += text_len
+            if total_len > config.MAX_TOTAL_BATCH_LENGTH:
+                raise ValueError(
+                    f'Total batch length ({total_len} chars) exceeds maximum allowed '
+                    f'({config.MAX_TOTAL_BATCH_LENGTH} chars)'
                 )
         
         return v
-    
-    @field_validator('texts')
-    @classmethod
-    def validate_total_length(cls, v: List[str]) -> List[str]:
-        """
-        Уровень 3: Проверка суммарной длины всех текстов.
-        Предотвращает ситуации, когда много коротких текстов 
-        в сумме дают слишком большой объем.
-        """
-        total_chars = sum(len(text) for text in v)
-        
-        if total_chars > config.MAX_TOTAL_BATCH_LENGTH:
-            raise ValueError(
-                f'Total batch length ({total_chars} chars) exceeds maximum allowed '
-                f'({config.MAX_TOTAL_BATCH_LENGTH} chars)'
-            )
-        
-        return v
-
 
 class BatchTokenCountRequest(BaseModel):
     """
@@ -122,46 +103,40 @@ class BatchTokenCountRequest(BaseModel):
     - MAX_BATCH_TOTAL_CHARS - максимальная суммарная длина
     """
     texts: List[str]
-    
+
     @field_validator('texts')
     @classmethod
-    def validate_batch_size(cls, v: List[str]) -> List[str]:
-        """Проверка количества текстов в батче"""
+    def validate(cls, v: List[str]) -> List[str]:
+        # Проверка на пустой батч
         if not v:
             raise ValueError('Batch cannot be empty')
         
+        # Проверка максимального размера батча (количества текстов в батче)
         if len(v) > config.MAX_BATCH_SIZE:
             raise ValueError(
                 f'Batch size ({len(v)} texts) exceeds maximum allowed '
                 f'({config.MAX_BATCH_SIZE} texts)'
             )
         
-        return v
-    
-    @field_validator('texts')
-    @classmethod
-    def validate_text_length(cls, v: List[str]) -> List[str]:
-        """Проверка длины каждого отдельного текста"""
+        # Проверка длины отдельных текстов и общей длины текстов
+        total_len = 0
         for i, text in enumerate(v):
-            if len(text) > config.MAX_TEXT_LENGTH:
+            text_len = len(text.strip())
+            if text_len == 0:
                 raise ValueError(
-                    f'Text at index {i} length ({len(text)} chars) exceeds maximum allowed '
+                    f'Text at index {i} is empty'
+                )
+            if text_len > config.MAX_TEXT_LENGTH:
+                raise ValueError(
+                    f'Text at index {i} length ({text_len} chars) exceeds maximum allowed '
                     f'({config.MAX_TEXT_LENGTH} chars)'
                 )
-        
-        return v
-    
-    @field_validator('texts')
-    @classmethod
-    def validate_total_length(cls, v: List[str]) -> List[str]:
-        """Проверка суммарной длины всех текстов"""
-        total_chars = sum(len(text) for text in v)
-        
-        if total_chars > config.MAX_TOTAL_BATCH_LENGTH:
-            raise ValueError(
-                f'Total batch length ({total_chars} chars) exceeds maximum allowed '
-                f'({config.MAX_TOTAL_BATCH_LENGTH} chars)'
-            )
+            total_len += text_len
+            if total_len > config.MAX_TOTAL_BATCH_LENGTH:
+                raise ValueError(
+                    f'Total batch length ({total_len} chars) exceeds maximum allowed '
+                    f'({config.MAX_TOTAL_BATCH_LENGTH} chars)'
+                )
         
         return v
 

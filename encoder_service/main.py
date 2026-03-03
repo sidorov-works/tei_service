@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+import slowapi
+
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 from shared.config import config
 from shared.encoder_models import (
@@ -188,6 +190,15 @@ app = FastAPI(
     description="Сервис для кодирования текста в векторные представления"
 )
 
+# Создаем limiter с in-memory хранилищем (по умолчанию)
+limiter = slowapi.Limiter(key_func=slowapi.util.get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(
+    slowapi.errors.RateLimitExceeded, 
+    slowapi._rate_limit_exceeded_handler
+)
+
+# Сделаем более красивую обработку ошибок валидации запросов (400 и с понятным сообщением)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -236,6 +247,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
+# Компилируем один раз при загрузке модуля.
+_clean_pattern = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
+
 def _clean_text(text: str) -> str:
     """
     Очистка текста перед кодированием.
@@ -245,12 +259,12 @@ def _clean_text(text: str) -> str:
     """
     if not text:
         return ""
-    
     # Оставляем только буквы, цифры, пробелы и основные знаки препинания
-    cleaned_text = re.sub(r'[^\w\s.,!?:\-\'\"()]', '', text, flags=re.UNICODE)
+    cleaned_text = _clean_pattern.sub('', text)
     # Убираем лишние пробелы и табуляции
     cleaned_text = ' '.join(cleaned_text.split())
     return cleaned_text
+
 
 def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
     """
@@ -266,7 +280,9 @@ def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
             cleaned_embedding.append(x)
     return cleaned_embedding
 
+
 @app.get("/info", response_model=EncoderInfo)
+@limiter.limit(config.RATE_LIMIT_INFO)
 async def get_encoder_info(request: Request):
     """
     Возвращает полную информацию об этом экземпляре энкодера.
@@ -296,6 +312,7 @@ async def get_encoder_info(request: Request):
     return encoder_service.encoder_info
 
 @app.post("/encode")
+@limiter.limit(config.RATE_LIMIT_ENCODE)
 def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
     Кодирование одного текста в вектор.
@@ -345,6 +362,7 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
         }
 
 @app.post("/encode_batch")
+@limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
 def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)):
     """
     Пакетное кодирование нескольких текстов.
@@ -402,6 +420,7 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
         }
     
 @app.get("/vector_size")
+@limiter.limit(config.RATE_LIMIT_INFO)
 def get_vector_size():
     """
     Возвращает длину вектора в используемой модели
@@ -409,6 +428,7 @@ def get_vector_size():
     return {"vector_size": encoder_service.encoder_info.model_info.vector_size}
 
 @app.get("/max_length")
+@limiter.limit(config.RATE_LIMIT_INFO)
 def get_max_length():
     """
     Возвращает максимальную длину текста (в токенах)
@@ -416,6 +436,7 @@ def get_max_length():
     return {"max_length": encoder_service.encoder_info.model_info.max_seq_length}
 
 @app.get("/health")
+@limiter.limit(config.RATE_LIMIT_INFO)
 async def health_check():
     """
     Проверка здоровья сервиса.
@@ -430,6 +451,7 @@ async def health_check():
     }
 
 @app.post("/count_tokens")
+@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
 def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
     """
     Определение количества токенов в тексте.
@@ -459,6 +481,7 @@ def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
 
 
 @app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
+@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS_BATCH)
 def count_tokens_batch_sync(
     request: BatchTokenCountRequest, 
     _: None = Depends(verify_internal)
