@@ -248,7 +248,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 # Компилируем один раз при загрузке модуля.
-_clean_pattern = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
+_CLEAN_PATTERN = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
 
 def _clean_text(text: str) -> str:
     """
@@ -260,7 +260,7 @@ def _clean_text(text: str) -> str:
     if not text:
         return ""
     # Оставляем только буквы, цифры, пробелы и основные знаки препинания
-    cleaned_text = _clean_pattern.sub('', text)
+    cleaned_text = _CLEAN_PATTERN.sub('', text)
     # Убираем лишние пробелы и табуляции
     cleaned_text = ' '.join(cleaned_text.split())
     return cleaned_text
@@ -522,7 +522,7 @@ def count_tokens_batch_sync(
             )
             token_counts.append(len(tokens))  # ← добавляем длину в список
         
-        logger.info(f"Batch token count: processed {len(request.texts)} texts")
+        logger.debug(f"Batch token count: processed {len(request.texts)} texts")
         
         return {
             "tokens_counts": token_counts, 
