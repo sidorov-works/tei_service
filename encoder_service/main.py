@@ -1,10 +1,21 @@
 # encoder_service/main.py
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 from shared.config import config
-from shared.encoder_models import EncoderInfo, EncoderModelInfo
+from shared.encoder_models import (
+    EncoderInfo, 
+    EncoderModelInfo,
+    EncodeRequest,
+    BatchEncodeRequest,
+    BatchTokenCountRequest,
+    BatchTokenCountResponse
+)
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 from pydantic import BaseModel
@@ -19,30 +30,6 @@ import torch  # для очистки памяти в методе close()
 
 setproctitle.setproctitle("encoder_service")
 logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
-
-
-# Модели данных для валидации запросов
-class EncodeRequest(BaseModel):
-    """
-    Для передачи энкодеру одного текста текста
-    """
-    text: str
-    request_type: Optional[str] = "query"
-
-class BatchEncodeRequest(BaseModel):
-    """Запрос на пакетное кодирование"""
-    texts: List[str]
-    request_type: Optional[str] = "query"
-
-
-class BatchTokenCountRequest(BaseModel):
-    """Для батчевого подсчета количества токенов в текстах"""
-    texts: List[str]
-
-class BatchTokenCountResponse(BaseModel):
-    """Ответ с длинами всех текстов в батче"""
-    tokens_counts: List[int]  # список длин текстов
-    service_available: bool
 
 
 async def verify_internal(request: Request):
@@ -200,6 +187,54 @@ app = FastAPI(
     title="Encoder Service",
     description="Сервис для кодирования текста в векторные представления"
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Глобальный обработчик ошибок валидации запросов.
+    
+    В FastAPI ВСЕ входящие запросы проходят через валидацию:
+    1. Парсинг JSON тела запроса
+    2. Проверка соответствия типам данных (Pydantic)
+    3. Выполнение пользовательских валидаторов (@field_validator)
+    
+    Если на любом из этих этапов возникает ошибка,
+    FastAPI выбрасывает исключение RequestValidationError.
+    
+    БЕЗ этого обработчика:
+    - FastAPI вернул бы стандартный ответ с массивом ошибок
+    - Клиент получил бы технический ответ, неудобный для парсинга
+    
+    С ЭТИМ обработчиком:
+    1. FastAPI при возникновении RequestValidationError 
+       вызывает эту функцию (благодаря декоратору)
+    2. Мы преобразуем массив ошибок в понятную строку
+    3. Добавляем service_available для единообразия API
+    4. Возвращаем единый формат ошибок для всех эндпоинтов
+    
+    Returns:
+        JSONResponse с HTTP 400 и единым форматом ошибки
+    """
+    errors = []
+    for error in exc.errors():
+        # 'loc' содержит путь к полю с ошибкой (например: ["body", "texts", 0])
+        field = " -> ".join(str(x) for x in error["loc"])
+        msg = error["msg"]
+        errors.append(f"{field}: {msg}")
+    
+    error_msg = "; ".join(errors)
+    
+    # Логируем для отладки (видно в консоли)
+    logger.warning(f"Validation error: {error_msg}")
+    
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Validation error",
+            "detail": error_msg,
+            "service_available": encoder_service.service_available
+        }
+    )
 
 def _clean_text(text: str) -> str:
     """

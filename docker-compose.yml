@@ -14,7 +14,8 @@ services:
       # Отдельная папка для логов первого сервиса
       - ./logs/encoder1:/app/logs
     env_file:
-      - .env.encoder1
+      - .env          # параметры, общие для всех сервисов
+      - .env.encoder2 # специфические параметры конкретного сервиса
     environment:
       - PORT=8260
       - DOCKER_ENV=false  # используем файловый логгер
@@ -49,7 +50,8 @@ services:
       # Отдельная папка для логов второго сервиса
       - ./logs/encoder2:/app/logs
     env_file:
-      - .env.encoder2
+      - .env          # параметры, общие для всех сервисов
+      - .env.encoder2 # специфические параметры конкретного сервиса
     environment:
       - PORT=8261
       - DOCKER_ENV=false

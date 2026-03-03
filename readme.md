@@ -256,7 +256,7 @@ pip install -r requirements.txt
 #### Настройка конфигурации
 Создайте файл `.env`:
 ```env
-ENCODER_NAME=deepvk                      # Уникальное имя этого энкодера
+ENCODER_NAME=deepvk                       # Уникальное имя этого энкодера
 INTERNAL_API_SECRET=your-secret-key
 DEVICE=cpu                                # или "mps" для Mac, "cuda" для NVIDIA
 HUGGING_FACE_MODEL_NAME=deepvk/USER2-base
@@ -306,7 +306,8 @@ services:
       - ./models:/app/models
       - ./logs:/app/logs
     env_file:
-      - .env
+      - .env          # параметры, общие для любого сервиса
+      - .env.encoder  # специфические параметры конкретного сервиса 
     environment:
       - DOCKER_ENV=false  # для использования файлового логгера
     restart: unless-stopped
@@ -344,7 +345,7 @@ services:
 │  └─────────────────┘│      │  └─────────────────┘│
 │  ┌─────────────────┐│      │  ┌─────────────────┐│
 │  │   Базовый слой  ││      │  │   Базовый слой  ││
-│  │  (общий для всех)││      │  │  (общий для всех)││
+│  │ (общий для всех)││      │  │ (общий для всех)││
 │  └─────────────────┘│      │  └─────────────────┘│
 └─────────────────────┘      └─────────────────────┘
 ```
@@ -361,8 +362,9 @@ encoder-service/
 ├── dockerfile.base            # для базового образа
 ├── dockerfile.service         # для экземпляров
 │
-├── .env.encoder1              # настройки экземпляра 1
-├── .env.encoder2              # настройки экземпляра 2
+├── .env                       # общие настройки любого экземпляра
+├── .env.encoder1              # специальные настройки экземпляра 1
+├── .env.encoder2              # специальные настройки экземпляра 2
 │
 ├── models/                     # общая папка для моделей
 │   └── sentence-transformers/  # сюда скачаются модели
@@ -452,7 +454,8 @@ services:
       # Отдельная папка для логов
       - ./logs/encoder1:/app/logs
     env_file:
-      - .env.encoder1
+      - .env          # параметры, общие для всех сервисов
+      - .env.encoder1 # специфические параметры сервиса 1
     environment:
       - PORT=8260
       - DOCKER_ENV=false  # для использования файлового логгера
@@ -487,7 +490,8 @@ services:
       # Отдельная папка для логов
       - ./logs/encoder2:/app/logs
     env_file:
-      - .env.encoder2
+      - .env          # параметры, общие для всех сервисов
+      - .env.encoder2 # специфические параметры сервиса 2
     environment:
       - PORT=8261
       - DOCKER_ENV=false
