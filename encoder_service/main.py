@@ -1,14 +1,19 @@
 # encoder_service/main.py
 
-from contextlib import asynccontextmanager
+# Сразу настроим логер
+import setproctitle
+from shared.utils.logger import logger as base_logger, wrap_logger_methods
 
+setproctitle.setproctitle("encoder_service")
+logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
+
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-
 import slowapi
-
-from shared.utils.logger import logger as base_logger, wrap_logger_methods
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from shared.config import config
 from shared.encoder_models import (
     EncoderInfo, 
@@ -20,43 +25,60 @@ from shared.encoder_models import (
 )
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
-from pydantic import BaseModel
 from pathlib import Path
-import setproctitle
 import asyncio
 from typing import List, Optional
 import re
 import math
+import threading
+from functools import wraps
+import torch
 
-import torch  # для очистки памяти в методе close()
+# Проверка подписи клиента в эндпойнтах.
+# Использование в эндпоинтах:
+#     @app.post("/encode")
+#     async def encode(..., token_data: dict = Depends(verify_jwt_token)):
+#         service_name = token_data.get("service")
+# Пока оставляем GET-эндпойнты без проверки (считаем что это безопасно)
+from shared.auth import verify_jwt_token, require_auth
 
-setproctitle.setproctitle("encoder_service")
-logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
 
+# Глобальная блокировка для защиты модели от параллельных вызовов
 
-async def verify_internal(request: Request):
+# SentenceTransformer модели НЕ потокобезопасны. Нельзя вызывать encoder.encode()
+# параллельно из разных потоков - это приведет к segmentation fault.
+# FastAPI запускает пул из 40 потоков для синхронных эндпоинтов,
+# поэтому необходима принудительная синхронизация.
+_MODEL_LOCK = threading.Lock()
+
+def synchronized_endpoint(func):
     """
-    Проверка (по секретному заголовку), 
-    что вызов внутренних эндпойнтов является действительно внутренним. 
-    В аргументы функций эндпойнтов необходимо включить: 
-    ```_: None = fastapi.Depends(verify_internal)
-    """
-    internal_secret = request.headers.get("X-Internal-Secret")
-    expected_secret = config.INTERNAL_API_SECRET
+    Декоратор для синхронизации эндпоинтов, работающих с моделью.
     
-    if not internal_secret or internal_secret != expected_secret:
-        logger.warning(f"Invalid internal secret from {request.client.host}")
-        raise HTTPException(status_code=403, detail="Forbidden")
+    Как работает:
+    1. FastAPI вызывает эндпоинт в одном из потоков пула (до 40 потоков)
+    2. Декоратор перехватывает вызов и захватывает глобальную блокировку _model_lock
+    3. Если блокировка свободна - поток продолжает выполнение эндпоинта
+    4. Если блокировка занята - поток ждет на входе в with
+    5. Когда текущий поток освобождает блокировку, следующий поток в очереди просыпается
+    
+    Таким образом, даже при 40 параллельных запросах, модель всегда
+    используется только одним потоком в каждый момент времени.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with _MODEL_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
+
 
 class EncoderService:
     """
     Сервис кодирования текста в эмбеддинги.
     
     КРИТИЧЕСКИ ВАЖНО: SentenceTransformer модели НЕ thread-safe.
-    Нельзя вызывать encoder.encode() параллельно из разных потоков.
-    
-    Решение: использовать синхронные эндпоинты в FastAPI.
-    FastAPI сам будет ставить запросы в очередь и обрабатывать их по одному.
+    Защита от параллельных вызовов реализована через декоратор synchronized_endpoint
+    на уровне эндпоинтов. Сам класс не содержит методов-оберток и не управляет блокировками.
     """
     def __init__(self):
         self.encoder = None   # Модель SentenceTransformer
@@ -93,7 +115,7 @@ class EncoderService:
             self.encoder = await asyncio.to_thread(
                 SentenceTransformer,
                 str(model_path),
-                device=config.DEVICE  # напрямую из конфига
+                device=config.DEVICE
             )
 
             # 3. Загружаем токенизатор
@@ -151,23 +173,23 @@ class EncoderService:
     async def close(self):
         """Корректное завершение работы с очисткой ресурсов"""
         if self.encoder:
-            # Явное удаление модели
             del self.encoder
             self.encoder = None
             
-            # Очистка памяти GPU/MPS
-            if torch.backends.mps.is_available():  # для Mac M1/M2
+            if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
                 logger.info("MPS cache cleared")
-            elif torch.cuda.is_available():        # для NVIDIA GPU
+            elif torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logger.info("CUDA cache cleared")
         
         self.service_available = False
         logger.info("Encoder service shutdown complete")
 
+
 # Глобальный экземпляр сервиса
 encoder_service = EncoderService()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -184,21 +206,22 @@ async def lifespan(app: FastAPI):
     finally:
         await encoder_service.close()
 
+
 app = FastAPI(
     lifespan=lifespan, 
     title="Encoder Service",
     description="Сервис для кодирования текста в векторные представления"
 )
 
-# Создаем limiter с in-memory хранилищем (по умолчанию)
-limiter = slowapi.Limiter(key_func=slowapi.util.get_remote_address)
+# Создаем rate limiter с in-memory хранилищем
+limiter = slowapi.Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(
-    slowapi.errors.RateLimitExceeded, 
+    RateLimitExceeded, 
     slowapi._rate_limit_exceeded_handler
 )
 
-# Сделаем более красивую обработку ошибок валидации запросов (400 и с понятным сообщением)
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -212,30 +235,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     Если на любом из этих этапов возникает ошибка,
     FastAPI выбрасывает исключение RequestValidationError.
     
-    БЕЗ этого обработчика:
-    - FastAPI вернул бы стандартный ответ с массивом ошибок
-    - Клиент получил бы технический ответ, неудобный для парсинга
-    
-    С ЭТИМ обработчиком:
-    1. FastAPI при возникновении RequestValidationError 
-       вызывает эту функцию (благодаря декоратору)
-    2. Мы преобразуем массив ошибок в понятную строку
-    3. Добавляем service_available для единообразия API
-    4. Возвращаем единый формат ошибок для всех эндпоинтов
-    
     Returns:
         JSONResponse с HTTP 400 и единым форматом ошибки
     """
     errors = []
     for error in exc.errors():
-        # 'loc' содержит путь к полю с ошибкой (например: ["body", "texts", 0])
         field = " -> ".join(str(x) for x in error["loc"])
         msg = error["msg"]
         errors.append(f"{field}: {msg}")
     
     error_msg = "; ".join(errors)
     
-    # Логируем для отладки (видно в консоли)
     logger.warning(f"Validation error: {error_msg}")
     
     return JSONResponse(
@@ -247,7 +257,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
-# Компилируем один раз при загрузке модуля.
+
+# Компилируем один раз при загрузке модуля
 _CLEAN_PATTERN = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
 
 def _clean_text(text: str) -> str:
@@ -259,9 +270,7 @@ def _clean_text(text: str) -> str:
     """
     if not text:
         return ""
-    # Оставляем только буквы, цифры, пробелы и основные знаки препинания
     cleaned_text = _CLEAN_PATTERN.sub('', text)
-    # Убираем лишние пробелы и табуляции
     cleaned_text = ' '.join(cleaned_text.split())
     return cleaned_text
 
@@ -283,7 +292,9 @@ def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
 
 @app.get("/info", response_model=EncoderInfo)
 @limiter.limit(config.RATE_LIMIT_INFO)
-async def get_encoder_info(request: Request):
+async def get_encoder_info(
+        request: Request # нужно для rate limiting (формальность)
+    ):
     """
     Возвращает полную информацию об этом экземпляре энкодера.
     
@@ -295,9 +306,8 @@ async def get_encoder_info(request: Request):
         EncoderInfo: Информация об энкодере и его модели
     """
     if not encoder_service.service_available or not encoder_service.encoder_info:
-        # Используем fallback с именем из конфига
         return EncoderInfo(
-            name=config.ENCODER_NAME,  # берем из config, а не из сервиса
+            name=config.ENCODER_NAME,
             model_info=EncoderModelInfo(
                 name=config.HUGGING_FACE_MODEL_NAME,
                 vector_size=None,
@@ -308,12 +318,17 @@ async def get_encoder_info(request: Request):
             status="degraded"
         )
     
-    # Возвращаем encoder_info
     return encoder_service.encoder_info
+
 
 @app.post("/encode")
 @limiter.limit(config.RATE_LIMIT_ENCODE)
-def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
+@synchronized_endpoint
+def encode_text(
+    encode_request: EncodeRequest, 
+    request: Request, # нужно для rate limiting
+    _: None = Depends(require_auth)
+    ):
     """
     Кодирование одного текста в вектор.
     
@@ -321,30 +336,35 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
     
     Почему синхронный:
     1. SentenceTransformer.encode() не thread-safe
-    2. FastAPI для синхронных эндпоинтов ставит запросы в очередь
-    3. Нет риска параллельных вызовов модели
+    2. FastAPI для синхронных эндпоинтов использует пул потоков (до 40 потоков)
+    3. Без защиты 40 потоков могут одновременно вызвать модель -> SEGFAULT
+    4. Декоратор @synchronized_endpoint захватывает глобальную блокировку
+    5. Только один поток может выполнять encode() в каждый момент времени
     
-    Если w_classifier и w_rag вызовут одновременно:
-    - Первый запрос начнет обрабатываться
-    - Второй будет ждать в очереди FastAPI
-    - Когда первый завершится, начнется второй
+    Как работает последовательность:
+    - Первый запрос захватывает блокировку и начинает encode()
+    - Второй запрос пытается захватить блокировку и ждет
+    - Третий запрос тоже ждет
+    - Когда первый завершается, второй захватывает блокировку и выполняет encode()
+    - И так далее
+    
+    Таким образом, запросы обрабатываются строго последовательно,
+    что гарантирует безопасную работу с не-потокобезопасной моделью.
     """
     try:
         if not encoder_service.service_available:
             return {"error": "Encoder service not available", "service_available": False}
         
-        # Очищаем текст
-        cleaned_text = _clean_text(request.text)
+        cleaned_text = _clean_text(encode_request.text)
 
-        # Добавляем префикс в зависимости от укзанного типа запроса
-        if request.request_type:
-            if request.request_type == "query":
+        if encode_request.request_type:
+            if encode_request.request_type == "query":
                 cleaned_text = config.QUERY_PREFIX + cleaned_text
-            elif request.request_type == "document":
+            elif encode_request.request_type == "document":
                 cleaned_text = config.DOCUMENT_PREFIX + cleaned_text
         
-        # СИНХРОННЫЙ вызов модели
-        # FastAPI гарантирует, что в этот момент модель не используется другими запросами
+        # Прямой вызов модели - декоратор гарантирует, что этот код
+        # выполняется только одним потоком в каждый момент времени
         embedding = encoder_service.encoder.encode(cleaned_text)
         cleaned_embedding = _clean_embedding(embedding.tolist()) 
         
@@ -361,48 +381,52 @@ def encode_text(request: EncodeRequest, _: None = Depends(verify_internal)):
             "service_available": encoder_service.service_available
         }
 
+
 @app.post("/encode_batch")
 @limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
-def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)):
+@synchronized_endpoint
+def encode_batch(
+    batch_encode_request: BatchEncodeRequest, 
+    request: Request, # нужно для rate limiting
+    _: None = Depends(require_auth)
+    ):
     """
     Пакетное кодирование нескольких текстов.
     
-    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
+    ВАЖНО: Использует ТУ ЖЕ САМУЮ блокировку, что и /encode.
+    Это значит, что:
+    - Не могут одновременно выполняться /encode и /encode_batch
+    - Все операции с моделью строго последовательны
+    - Batch-обработка не дает выигрыша в параллельности, но дает
+      выигрыш в эффективности использования GPU (один большой батч
+      вместо множества маленьких)
     
-    Это основной эндпоинт для воркеров (w_classifier и w_rag).
-    
-    Как работает очередность:
-    1. w_classifier отправляет запрос → FastAPI начинает обработку
-    2. w_rag отправляет запрос → FastAPI ставит в очередь
-    3. w_classifier запрос обработан → ответ
-    4. w_rag запрос начинает обработку → ответ
-    
-    Результат: никаких segmentation fault, запросы обрабатываются по очереди.
+    Как работает при высокой нагрузке:
+    1. Приходит 10 запросов к /encode и 5 запросов к /encode_batch
+    2. Все они пытаются захватить одну блокировку _model_lock
+    3. Выполняются строго по очереди: encode, encode_batch, encode, ...
+    4. Модель всегда используется одним потоком, race conditions исключены
     """
     try:
         if not encoder_service.service_available:
             return {"error": "Encoder service not available", "service_available": False}
         
-        # Префикс в зависимости от укзанного типа запроса
         prefix = None
-        if request.request_type:
-            if request.request_type == "query":
+        if batch_encode_request.request_type:
+            if batch_encode_request.request_type == "query":
                 prefix = config.QUERY_PREFIX
-            elif request.request_type == "document":
+            elif batch_encode_request.request_type == "document":
                 prefix = config.DOCUMENT_PREFIX
         
-        # Очищаем все тексты и добавляем префикс (если нужен)
         if prefix:
-            cleaned_texts = [prefix + _clean_text(text) for text in request.texts]
+            cleaned_texts = [prefix + _clean_text(text) for text in batch_encode_request.texts]
         else:
-            cleaned_texts = [_clean_text(text) for text in request.texts]
+            cleaned_texts = [_clean_text(text) for text in batch_encode_request.texts]
         
-        # Логируем информацию о батче для отладки
         total_chars = sum(len(text) for text in cleaned_texts)
         logger.debug(f"Processing batch: {len(cleaned_texts)} texts, {total_chars} total chars")
         
-        # СИНХРОННЫЙ вызов модели для всего батча
-        # Модель умеет обрабатывать батчи эффективно, но только по одному батчу за раз
+        # Прямой batch-вызов модели под защитой той же блокировки
         embeddings = encoder_service.encoder.encode(cleaned_texts)
         embeddings_list = [_clean_embedding(embedding.tolist()) for embedding in embeddings]
         
@@ -418,26 +442,35 @@ def encode_batch(request: BatchEncodeRequest, _: None = Depends(verify_internal)
             "error": str(e),
             "service_available": encoder_service.service_available
         }
-    
+
+
 @app.get("/vector_size")
 @limiter.limit(config.RATE_LIMIT_INFO)
-def get_vector_size():
+def get_vector_size(
+        request: Request, # нужно для rate limiting
+    ):
     """
     Возвращает длину вектора в используемой модели
     """
     return {"vector_size": encoder_service.encoder_info.model_info.vector_size}
 
+
 @app.get("/max_length")
 @limiter.limit(config.RATE_LIMIT_INFO)
-def get_max_length():
+def get_max_length(
+        request: Request, # нужно для rate limiting
+    ):
     """
     Возвращает максимальную длину текста (в токенах)
     """
     return {"max_length": encoder_service.encoder_info.model_info.max_seq_length}
 
+
 @app.get("/health")
 @limiter.limit(config.RATE_LIMIT_INFO)
-async def health_check():
+async def health_check(
+        request: Request, # нужно для rate limiting
+    ):
     """
     Проверка здоровья сервиса.
     
@@ -450,23 +483,27 @@ async def health_check():
         "service_available": encoder_service.service_available
     }
 
+
 @app.post("/count_tokens")
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
-def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
+@synchronized_endpoint
+def count_tokens(
+        encode_request: EncodeRequest, 
+        request: Request, # нужно для rate limiting
+        _: None = Depends(require_auth)
+    ):
     """
     Определение количества токенов в тексте.
     
-    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
-    
-    Токенизатор также не является полностью thread-safe,
-    поэтому используем синхронный эндпоинт.
+    Токенизатор также не является полностью потокобезопасным,
+    поэтому защищаем его той же блокировкой, что и модель.
     """
     try:
         if not encoder_service.service_available:
             return {"error": "Encoder service not available", "service_available": False}
         
         tokens = encoder_service.tokenizer.encode(
-            request.text,
+            encode_request.text,
             add_special_tokens=True,
             truncation=True
         )
@@ -482,23 +519,26 @@ def tokens_count(request: EncodeRequest, _: None = Depends(verify_internal)):
 
 @app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS_BATCH)
-def count_tokens_batch_sync(
-    request: BatchTokenCountRequest, 
-    _: None = Depends(verify_internal)
+@synchronized_endpoint
+def count_tokens_batch(
+    batch_token_count_request: BatchTokenCountRequest, 
+    request: Request, # нужно для rate limiting
+    _: None = Depends(require_auth)
 ):
     """
-    СИНХРОННЫЙ подсчет токенов для нескольких текстов за один запрос.
+    Пакетный подсчет токенов для нескольких текстов за один запрос.
+
     
     Возвращает СПИСОК длин для каждого текста в том же порядке.
     
     Пример запроса:
     {
-        "texts": ["короткий текст", "очень длинный текст с множеством слов и предложений"]
+        "texts": ["короткий текст", "очень длинный текст"]
     }
     
     Пример ответа:
     {
-        "tokens_counts": [3, 15],  # ← первый текст - 3 токена, второй - 15 токенов
+        "tokens_counts": [3, 15],
         "count": 2,
         "service_available": true
     }
@@ -506,23 +546,22 @@ def count_tokens_batch_sync(
     try:
         if not encoder_service.service_available:
             return {
-                "tokens_counts": [],  # пустой список при ошибке
+                "tokens_counts": [],
                 "count": 0,
                 "service_available": False
             }
         
         token_counts = []
         
-        # Для КАЖДОГО текста считаем токены и добавляем в список
-        for text in request.texts:
+        for text in batch_token_count_request.texts:
             tokens = encoder_service.tokenizer.encode(
                 text,
                 add_special_tokens=True,
                 truncation=True
             )
-            token_counts.append(len(tokens))  # ← добавляем длину в список
+            token_counts.append(len(tokens))
         
-        logger.debug(f"Batch token count: processed {len(request.texts)} texts")
+        logger.debug(f"Batch token count: processed {len(batch_token_count_request.texts)} texts")
         
         return {
             "tokens_counts": token_counts, 
