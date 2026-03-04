@@ -58,6 +58,8 @@ class TaskType(Enum):
     COUNT_TOKENS = "count_tokens"
     COUNT_TOKENS_BATCH = "count_tokens_batch"
 
+BATCH_TASKS = [TaskType.ENCODE_BATCH, TaskType.COUNT_TOKENS_BATCH]
+
 @dataclass
 class Task:
     """
@@ -490,7 +492,7 @@ async def submit_task(
     # 1. Базовый таймаут из конфига (зависит от типа задачи)
     default_timeout = (
         config.ENCODER_BATCH_TIMEOUT 
-        if task_type == TaskType.ENCODE_BATCH 
+        if task_type in BATCH_TASKS 
         else config.ENCODER_BASE_TIMEOUT
     )
     
