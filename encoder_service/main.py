@@ -1,6 +1,5 @@
 # encoder_service/main.py
 
-# Сразу настроим логер
 import setproctitle
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 
@@ -27,185 +26,395 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 from pathlib import Path
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import re
 import math
-import threading
-from functools import wraps
-import torch
+import uuid
+import time
+from dataclasses import dataclass
+from enum import Enum
 
-# Проверка подписи клиента в эндпойнтах.
-# Использование в эндпоинтах:
-#     @app.post("/encode")
-#     async def encode(..., token_data: dict = Depends(verify_jwt_token)):
-#         service_name = token_data.get("service")
-# Пока оставляем GET-эндпойнты без проверки (считаем что это безопасно)
 from shared.auth import verify_jwt_token, require_auth
 
 
-# Глобальная блокировка для защиты модели от параллельных вызовов
+# ======================================================================
+# КОНСТАНТЫ
+# ======================================================================
 
-# SentenceTransformer модели НЕ потокобезопасны. Нельзя вызывать encoder.encode()
-# параллельно из разных потоков - это приведет к segmentation fault.
-# FastAPI запускает пул из 40 потоков для синхронных эндпоинтов,
-# поэтому необходима принудительная синхронизация.
-_MODEL_LOCK = threading.Lock()
+# Жесткий потолок таймаута - сервис НИКОГДА не будет ждать дольше
+# На случай, если клиент укажет в запросе какой-то нереально 
+# огромный тайм-аут
+MAX_SERVICE_TIMEOUT = config.MAX_SERVICE_TIMEOUT
 
-def synchronized_endpoint(func):
+
+# ======================================================================
+# АРХИТЕКТУРА: Очередь + Воркер
+# ======================================================================
+
+class TaskType(Enum):
+    """Типы задач, которые может выполнять воркер"""
+    ENCODE = "encode"
+    ENCODE_BATCH = "encode_batch"
+    COUNT_TOKENS = "count_tokens"
+    COUNT_TOKENS_BATCH = "count_tokens_batch"
+
+@dataclass
+class Task:
     """
-    Декоратор для синхронизации эндпоинтов, работающих с моделью.
+    Задача для воркера.
     
-    Как работает:
-    1. FastAPI вызывает эндпоинт в одном из потоков пула (до 40 потоков)
-    2. Декоратор перехватывает вызов и захватывает глобальную блокировку _model_lock
-    3. Если блокировка свободна - поток продолжает выполнение эндпоинта
-    4. Если блокировка занята - поток ждет на входе в with
-    5. Когда текущий поток освобождает блокировку, следующий поток в очереди просыпается
+    Каждая задача имеет уникальный ID, по которому мы найдем Future,
+    когда результат будет готов.
     
-    Таким образом, даже при 40 параллельных запросах, модель всегда
-    используется только одним потоком в каждый момент времени.
+    Важное дополнение: client_timeout - сколько клиент готов ждать.
+    Воркер может использовать это для приоритезации, но основная логика
+    таймаутов реализована в submit_task.
     """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        with _MODEL_LOCK:
-            return func(*args, **kwargs)
-    return wrapper
+    task_id: str
+    task_type: TaskType
+    data: Any  # Текст, список текстов и т.д.
+    created_at: float
+    request_type: Optional[str] = None
+    client_timeout: Optional[float] = None  # Сколько клиент готов ждать
 
+@dataclass
+class TaskResult:
+    """Результат выполнения задачи"""
+    task_id: str
+    success: bool
+    result: Any = None
+    error: str = None
 
-class EncoderService:
+class ModelWorker:
     """
-    Сервис кодирования текста в эмбеддинги.
+    Единственный владелец модели SentenceTransformer.
     
-    КРИТИЧЕСКИ ВАЖНО: SentenceTransformer модели НЕ thread-safe.
-    Защита от параллельных вызовов реализована через декоратор synchronized_endpoint
-    на уровне эндпоинтов. Сам класс не содержит методов-оберток и не управляет блокировками.
+    Работает в отдельной корутине, имеет эксклюзивный доступ к модели.
+    Все запросы к модели проходят через него последовательно.
     """
-    def __init__(self):
-        self.encoder = None   # Модель SentenceTransformer
-        self.tokenizer = None # Отдельный объект токенизатора
-        self.service_available = False  # Флаг доступности сервиса
-        self.encoder_info: Optional[EncoderInfo] = None # Заполним, когда загрузим модель
-
-    async def connect(self) -> bool:
-        """Инициализация сервиса - загрузка модели эмбеддингов"""
+    
+    def __init__(self, input_queue: asyncio.Queue, output_queue: asyncio.Queue):
+        self.input_queue = input_queue
+        self.output_queue = output_queue
+        self.encoder = None
+        self.tokenizer = None
+        self.running = True
+        self.tasks_processed = 0
+        self.total_processing_time = 0.0
+        
+    async def start(self):
+        """Загружает модель и запускает основной цикл обработки"""
         try:
             model_id = config.HUGGING_FACE_MODEL_NAME
             model_path: Path = config.MODEL_PATH / model_id
             
-            # 1. Проверяем и скачиваем SentenceTransformer модель, если её нет
-            if not model_path.exists():
-                logger.info(f"Модель не найдена по пути {model_path}. Начинаю скачивание...")
-                model_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Скачиваем модель из интернета
-                tmp_model = await asyncio.to_thread(
-                    SentenceTransformer, 
-                    model_id
-                )
-                # Сохраняем локально
-                await asyncio.to_thread(tmp_model.save, str(model_path))
-                logger.info(f"Модель сохранена в {model_path}")
-            else:
-                logger.info(f"Найдена локальная копия модели: {model_path}")
-
-            logger.info(f"Загружаю модель с диска: {model_path}")
-            logger.info(f"Использую устройство: {config.DEVICE}")
-            
-            # 2. Загружаем SentenceTransformer модель с диска
+            logger.info(f"Worker: загружаю модель {model_id}")
             self.encoder = await asyncio.to_thread(
                 SentenceTransformer,
-                str(model_path),
+                str(model_path) if model_path.exists() else model_id,
                 device=config.DEVICE
             )
-
-            # 3. Загружаем токенизатор
-            tokenizer_path = model_path / "tokenizer"
             
-            if tokenizer_path.exists() and (tokenizer_path / "tokenizer_config.json").exists():
-                logger.info(f"Загружаю токенизатор из локальной копии: {tokenizer_path}")
-                self.tokenizer = await asyncio.to_thread(
-                    AutoTokenizer.from_pretrained,
-                    str(tokenizer_path)
-                )
-            else:
-                logger.info(f"Загружаю токенизатор из интернета: {model_id}")
-                self.tokenizer = await asyncio.to_thread(
-                    AutoTokenizer.from_pretrained,
-                    model_id
-                )
-                
-                tokenizer_path.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(self.tokenizer.save_pretrained, str(tokenizer_path))
-                logger.info(f"Токенизатор сохранен в {tokenizer_path}")
-            
-            # 4. Проверяем загрузку
-            if self.tokenizer is None:
-                logger.error("Не удалось загрузить токенизатор")
-                return False
-            
-            # 5. Получаем реальные значения параметров из модели
-            actual_vector_size = self.encoder.get_sentence_embedding_dimension()
-            actual_max_length = self.encoder.max_seq_length
-            
-            self.encoder_info = EncoderInfo(
-                name=config.ENCODER_NAME,
-                model_info=EncoderModelInfo(
-                    name=config.HUGGING_FACE_MODEL_NAME,
-                    vector_size=actual_vector_size,
-                    max_seq_length=actual_max_length,
-                    query_prefix=config.QUERY_PREFIX,
-                    document_prefix=config.DOCUMENT_PREFIX
-                )
+            self.tokenizer = await asyncio.to_thread(
+                AutoTokenizer.from_pretrained,
+                model_id
             )
-
-            self.service_available = True
-            logger.info(f"Модель энкодера успешно загружена: {self.encoder_info.model_info.name}")
-            logger.info(f"Размер вектора: {self.encoder_info.model_info.vector_size}")
-            logger.info(f"Max sequence length: {self.encoder_info.model_info.max_seq_length}")
             
-            return True
+            logger.info(f"Worker: модель загружена, начинаю обработку задач")
+            
+            while self.running:
+                try:
+                    # Ждем новую задачу
+                    task = await asyncio.wait_for(
+                        self.input_queue.get(), 
+                        timeout=1.0
+                    )
+                    
+                    await self._process_task(task)
+                    self.input_queue.task_done()
+                    
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.error(f"Worker: ошибка в основном цикле: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Worker: критическая ошибка при загрузке модели: {e}")
+            self.running = False
+    
+    async def _process_task(self, task: Task):
+        """Обрабатывает одну задачу - единственное место, где используется модель"""
+        
+        start_time = time.time()
+        logger.debug(f"Worker: начал обработку задачи {task.task_id} типа {task.task_type}")
+        
+        try:
+            result_data = None
+            
+            if task.task_type == TaskType.ENCODE:
+                text = task.data
+                if task.request_type == "query":
+                    text = config.QUERY_PREFIX + text
+                elif task.request_type == "document":
+                    text = config.DOCUMENT_PREFIX + text
+                
+                embedding = self.encoder.encode(text)
+                result_data = _clean_embedding(embedding.tolist())
+                
+            elif task.task_type == TaskType.ENCODE_BATCH:
+                texts = task.data
+                prefix = None
+                if task.request_type == "query":
+                    prefix = config.QUERY_PREFIX
+                elif task.request_type == "document":
+                    prefix = config.DOCUMENT_PREFIX
+                
+                if prefix:
+                    texts = [prefix + text for text in texts]
+                
+                embeddings = self.encoder.encode(texts)
+                result_data = [_clean_embedding(emb.tolist()) for emb in embeddings]
+                
+            elif task.task_type == TaskType.COUNT_TOKENS:
+                text = task.data
+                tokens = self.tokenizer.encode(text, add_special_tokens=True)
+                result_data = len(tokens)
+                
+            elif task.task_type == TaskType.COUNT_TOKENS_BATCH:
+                texts = task.data
+                token_counts = []
+                for text in texts:
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True)
+                    token_counts.append(len(tokens))
+                result_data = token_counts
+            
+            # Отправляем успешный результат
+            await self.output_queue.put(TaskResult(
+                task_id=task.task_id,
+                success=True,
+                result=result_data
+            ))
+            
+            processing_time = time.time() - start_time
+            self.tasks_processed += 1
+            self.total_processing_time += processing_time
+            
+            logger.debug(f"Worker: завершил задачу {task.task_id} за {processing_time:.3f}с")
             
         except Exception as e:
-            logger.error(f"Ошибка загрузки модели: {e}", exc_info=True)
-            self.service_available = False
-            return False
+            logger.error(f"Worker: ошибка при обработке задачи {task.task_id}: {e}")
+            await self.output_queue.put(TaskResult(
+                task_id=task.task_id,
+                success=False,
+                error=str(e)
+            ))
+    
+    async def stop(self):
+        """Останавливает воркер"""
+        self.running = False
+        logger.info(f"Worker: остановлен. Обработано задач: {self.tasks_processed}")
 
-    async def close(self):
-        """Корректное завершение работы с очисткой ресурсов"""
-        if self.encoder:
-            del self.encoder
-            self.encoder = None
-            
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-                logger.info("MPS cache cleared")
-            elif torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.info("CUDA cache cleared")
+
+class ResultDispatcher:
+    """
+    Диспетчер результатов.
+    
+    Получает результаты от воркера и направляет их в соответствующие Future.
+    """
+    
+    def __init__(self):
+        # Словарь активных Future: task_id -> (future, created_at, client_timeout)
+        # client_timeout нужен для проверки, не пора ли убить задачу
+        self.active_futures: Dict[str, tuple[asyncio.Future, float, Optional[float]]] = {}
+        self._lock = asyncio.Lock()
         
-        self.service_available = False
-        logger.info("Encoder service shutdown complete")
+    def register(self, task_id: str, future: asyncio.Future, client_timeout: Optional[float] = None):
+        """Регистрирует новый ожидающий запрос"""
+        self.active_futures[task_id] = (future, time.time(), client_timeout)
+        
+    def unregister(self, task_id: str):
+        """Удаляет завершенный или отмененный запрос"""
+        self.active_futures.pop(task_id, None)
+        
+    async def dispatch(self, result_queue: asyncio.Queue):
+        """
+        Основной цикл диспетчера.
+        Слушает очередь результатов и пробуждает ожидающие запросы.
+        """
+        while True:
+            try:
+                result = await result_queue.get()
+                
+                future_info = self.active_futures.get(result.task_id)
+                if future_info:
+                    future, _, _ = future_info
+                    
+                    if result.success:
+                        future.set_result(result.result)
+                    else:
+                        future.set_exception(Exception(result.error))
+                    
+                    self.unregister(result.task_id)
+                else:
+                    logger.warning(f"Получен результат для неизвестного task_id: {result.task_id}")
+                
+                result_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Dispatcher: ошибка: {e}")
+    
+    async def cleanup_stale(self):
+        """
+        Периодическая очистка "зависших" задач.
+        
+        Проверяет, не превысили ли задачи максимальное время ожидания.
+        Учитывает client_timeout - если клиент просил ждать 60 секунд,
+        а прошло 70, то задачу пора убивать.
+        """
+        while True:
+            await asyncio.sleep(10)  # Проверяем каждые 10 секунд
+            now = time.time()
+            stale_ids = []
+            
+            async with self._lock:
+                for task_id, (future, created_at, client_timeout) in list(self.active_futures.items()):
+                    # Сколько прошло времени с создания задачи
+                    age = now - created_at
+                    
+                    # Определяем максимальное время жизни задачи
+                    if client_timeout:
+                        # Если клиент указал таймаут - уважаем его (но не больше MAX_SERVICE_TIMEOUT)
+                        max_age = min(client_timeout, MAX_SERVICE_TIMEOUT)
+                    else:
+                        # Если не указал - используем базовый таймаут encode
+                        # Но мы не знаем тип задачи в диспетчере, поэтому используем консервативное значение
+                        max_age = config.ENCODER_BASE_TIMEOUT
+                    
+                    # Добавляем запас в 5 секунд на обработку
+                    max_age += 5
+                    
+                    if age > max_age and not future.done():
+                        stale_ids.append(task_id)
+                        # Отменяем Future с таймаутом
+                        future.set_exception(
+                            asyncio.TimeoutError(f"Task expired after {age:.1f} seconds")
+                        )
+                
+                for task_id in stale_ids:
+                    self.active_futures.pop(task_id, None)
+            
+            if stale_ids:
+                logger.warning(f"Очищено зависших задач: {len(stale_ids)}")
 
 
-# Глобальный экземпляр сервиса
-encoder_service = EncoderService()
+# ======================================================================
+# Глобальные объекты
+# ======================================================================
 
+# Очереди для общения между FastAPI и воркером
+input_queue = asyncio.Queue(maxsize=1000)
+output_queue = asyncio.Queue(maxsize=1000)
+
+# Воркер с моделью
+worker = ModelWorker(input_queue, output_queue)
+
+# Диспетчер результатов
+dispatcher = ResultDispatcher()
+
+# Информация об энкодере
+encoder_info: Optional[EncoderInfo] = None
+
+
+# ======================================================================
+# Вспомогательные функции
+# ======================================================================
+
+_CLEAN_PATTERN = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
+
+def _clean_text(text: str) -> str:
+    """Очистка текста перед кодированием"""
+    if not text:
+        return ""
+    cleaned_text = _CLEAN_PATTERN.sub('', text)
+    cleaned_text = ' '.join(cleaned_text.split())
+    return cleaned_text
+
+def _clean_embedding(embedding: List[float]) -> List[float]:
+    """Очищает вектор от NaN и Inf"""
+    cleaned_embedding = []
+    for x in embedding:
+        if math.isnan(x):
+            cleaned_embedding.append(0.0)
+        elif math.isinf(x):
+            cleaned_embedding.append(0.0)
+        else:
+            cleaned_embedding.append(x)
+    return cleaned_embedding
+
+
+# ======================================================================
+# Жизненный цикл приложения
+# ======================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Управление жизненным циклом FastAPI приложения.
+    global encoder_info
     
-    При запуске: загружаем модель.
-    При завершении: очищаем ресурсы.
-    """
-    try:
-        if not await encoder_service.connect():
-            logger.error("Encoder service failed to initialize")
-        yield
-    finally:
-        await encoder_service.close()
+    # Запускаем воркера
+    worker_task = asyncio.create_task(worker.start())
+    
+    # Запускаем диспетчер и чистильщик
+    dispatcher_task = asyncio.create_task(dispatcher.dispatch(output_queue))
+    cleaner_task = asyncio.create_task(dispatcher.cleanup_stale())
+    
+    # Ждем загрузки модели без таймаута - сколько надо, столько и ждем
+    while worker.encoder is None and worker.running:
+        await asyncio.sleep(0.1)
+    
+    # Теперь модель точно загружена
+    if worker.encoder:
+        encoder_info = EncoderInfo(
+            name=config.ENCODER_NAME,
+            model_info=EncoderModelInfo(
+                name=config.HUGGING_FACE_MODEL_NAME,
+                vector_size=worker.encoder.get_sentence_embedding_dimension(),
+                max_seq_length=worker.encoder.max_seq_length,
+                query_prefix=config.QUERY_PREFIX,
+                document_prefix=config.DOCUMENT_PREFIX
+            ),
+            status="operational"
+        )
+        logger.info(f"Encoder Service запущен, модель {config.HUGGING_FACE_MODEL_NAME} загружена")
+    else:
+        encoder_info = EncoderInfo(
+            name=config.ENCODER_NAME,
+            model_info=EncoderModelInfo(
+                name=config.HUGGING_FACE_MODEL_NAME,
+                vector_size=None,
+                max_seq_length=None,
+                query_prefix=config.QUERY_PREFIX,
+                document_prefix=config.DOCUMENT_PREFIX
+            ),
+            status="degraded"
+        )
+        logger.error("Модель не загрузилась!")
+    
+    logger.info(f"Максимальный таймаут сервиса: {MAX_SERVICE_TIMEOUT}с")
+    
+    yield
+    
+    # Останавливаем
+    worker.running = False
+    worker_task.cancel()
+    dispatcher_task.cancel()
+    cleaner_task.cancel()
 
+
+# ======================================================================
+# FastAPI приложение
+# ======================================================================
 
 app = FastAPI(
     lifespan=lifespan, 
@@ -213,31 +422,15 @@ app = FastAPI(
     description="Сервис для кодирования текста в векторные представления"
 )
 
-# Создаем rate limiter с in-memory хранилищем
+# Rate limiter
 limiter = slowapi.Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
-app.add_exception_handler(
-    RateLimitExceeded, 
-    slowapi._rate_limit_exceeded_handler
-)
+app.add_exception_handler(RateLimitExceeded, slowapi._rate_limit_exceeded_handler)
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """
-    Глобальный обработчик ошибок валидации запросов.
-    
-    В FastAPI ВСЕ входящие запросы проходят через валидацию:
-    1. Парсинг JSON тела запроса
-    2. Проверка соответствия типам данных (Pydantic)
-    3. Выполнение пользовательских валидаторов (@field_validator)
-    
-    Если на любом из этих этапов возникает ошибка,
-    FastAPI выбрасывает исключение RequestValidationError.
-    
-    Returns:
-        JSONResponse с HTTP 400 и единым форматом ошибки
-    """
+    """Обработчик ошибок валидации"""
     errors = []
     for error in exc.errors():
         field = " -> ".join(str(x) for x in error["loc"])
@@ -245,7 +438,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         errors.append(f"{field}: {msg}")
     
     error_msg = "; ".join(errors)
-    
     logger.warning(f"Validation error: {error_msg}")
     
     return JSONResponse(
@@ -253,59 +445,131 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "error": "Validation error",
             "detail": error_msg,
-            "service_available": encoder_service.service_available
+            "service_available": True
         }
     )
 
 
-# Компилируем один раз при загрузке модуля
-_CLEAN_PATTERN = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
+# ======================================================================
+# Функция отправки задачи (САМАЯ ВАЖНАЯ - ЗДЕСЬ ЛОГИКА ТАЙМАУТОВ)
+# ======================================================================
 
-def _clean_text(text: str) -> str:
+async def submit_task(
+    task_type: TaskType, 
+    data: Any, 
+    request_type: Optional[str] = None,
+    client_timeout: Optional[float] = None
+) -> Any:
     """
-    Очистка текста перед кодированием.
+    Отправка задачи воркеру и ожидание результата с учетом таймаутов.
     
-    Удаляет нестандартные символы, которые могут вызвать проблемы
-    с токенизатором или кодированием.
+    Логика таймаутов:
+    1. Если клиент передал timeout - используем его, но не больше MAX_SERVICE_TIMEOUT
+    2. Если клиент не передал - используем таймаут по умолчанию из конфига
+    3. В любом случае, никогда не ждем дольше MAX_SERVICE_TIMEOUT
+    
+    Args:
+        task_type: Тип задачи
+        data: Данные для обработки
+        request_type: query или document
+        client_timeout: Сколько клиент готов ждать (опционально)
     """
-    if not text:
-        return ""
-    cleaned_text = _CLEAN_PATTERN.sub('', text)
-    cleaned_text = ' '.join(cleaned_text.split())
-    return cleaned_text
+    # Проверяем очередь
+    if input_queue.qsize() >= 900:
+        logger.warning(f"Очередь почти полна: {input_queue.qsize()}")
+        raise HTTPException(503, "Service busy, queue is full")
+    
+    # Генерируем ID задачи
+    task_id = str(uuid.uuid4())
+    
+    # Создаем Future
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    
+    # Определяем эффективный таймаут
+    # 1. Базовый таймаут из конфига (зависит от типа задачи)
+    default_timeout = (
+        config.ENCODER_BATCH_TIMEOUT 
+        if task_type == TaskType.ENCODE_BATCH 
+        else config.ENCODER_BASE_TIMEOUT
+    )
+    
+    # 2. Если клиент передал свой таймаут - берем его, но не больше MAX_SERVICE_TIMEOUT
+    if client_timeout is not None:
+        effective_timeout = min(client_timeout, MAX_SERVICE_TIMEOUT)
+        logger.debug(f"Клиент указал timeout={client_timeout}, используем {effective_timeout}")
+    else:
+        # 3. Иначе используем базовый, но тоже не больше MAX_SERVICE_TIMEOUT
+        effective_timeout = min(default_timeout, MAX_SERVICE_TIMEOUT)
+        logger.debug(f"Клиент не указал timeout, используем {effective_timeout}")
+    
+    # Регистрируем в диспетчере (передаем client_timeout для cleaner'a)
+    dispatcher.register(task_id, future, client_timeout)
+    
+    # Создаем задачу
+    task = Task(
+        task_id=task_id,
+        task_type=task_type,
+        data=data,
+        created_at=time.time(),
+        request_type=request_type,
+        client_timeout=client_timeout  # Передаем воркеру для информации
+    )
+    
+    try:
+        # Отправляем задачу
+        await input_queue.put(task)
+        logger.debug(f"Задача {task_id} отправлена в очередь")
+        
+        # Ждем результат с эффективным таймаутом
+        try:
+            result = await asyncio.wait_for(future, timeout=effective_timeout)
+            return result
+            
+        except asyncio.TimeoutError:
+            # Таймаут - клиент устал ждать
+            logger.warning(f"Таймаут задачи {task_id} после {effective_timeout}с")
+            dispatcher.unregister(task_id)
+            
+            # Отменяем Future, чтобы освободить ресурсы
+            if not future.done():
+                future.cancel()
+            
+            # Возвращаем 504 с информацией о таймауте
+            raise HTTPException(
+                504, 
+                f"Request timeout after {effective_timeout} seconds"
+            )
+            
+        except asyncio.CancelledError:
+            # Клиент отменил запрос (разорвал соединение)
+            logger.debug(f"Запрос {task_id} отменен клиентом")
+            dispatcher.unregister(task_id)
+            if not future.done():
+                future.cancel()
+            raise
+            
+    except HTTPException:
+        # Пробрасываем HTTP исключения дальше
+        raise
+    except Exception as e:
+        # Любые другие ошибки
+        dispatcher.unregister(task_id)
+        if not future.done():
+            future.cancel()
+        logger.error(f"Ошибка при обработке задачи {task_id}: {e}")
+        raise HTTPException(500, f"Internal server error: {str(e)}")
 
 
-def _clean_embedding(embedding: List[float]) -> Optional[List[float]]:
-    """
-    Очищает вектор от NaN и Inf
-    """
-    cleaned_embedding = []
-    for x in embedding:
-        if math.isnan(x):
-            cleaned_embedding.append(0)
-        elif math.isinf(x):
-            raise Exception("Inf value in embedding")
-        else:
-            cleaned_embedding.append(x)
-    return cleaned_embedding
-
+# ======================================================================
+# ЭНДПОЙНТЫ (интерфейс полностью сохранен + новое поле timeout)
+# ======================================================================
 
 @app.get("/info", response_model=EncoderInfo)
 @limiter.limit(config.RATE_LIMIT_INFO)
-async def get_encoder_info(
-        request: Request # нужно для rate limiting (формальность)
-    ):
-    """
-    Возвращает полную информацию об этом экземпляре энкодера.
-    
-    Этот эндпоинт не требует аутентификации, так как используется
-    клиентами при инициализации для получения данных о модели.
-    Информация о модели не является чувствительной.
-    
-    Returns:
-        EncoderInfo: Информация об энкодере и его модели
-    """
-    if not encoder_service.service_available or not encoder_service.encoder_info:
+async def get_encoder_info(request: Request):
+    """Информация об энкодере"""
+    if not worker.encoder:
         return EncoderInfo(
             name=config.ENCODER_NAME,
             model_info=EncoderModelInfo(
@@ -318,261 +582,176 @@ async def get_encoder_info(
             status="degraded"
         )
     
-    return encoder_service.encoder_info
+    # Обновляем информацию из модели
+    encoder_info.model_info.vector_size = worker.encoder.get_sentence_embedding_dimension()
+    encoder_info.model_info.max_seq_length = worker.encoder.max_seq_length
+    
+    return encoder_info
 
 
 @app.post("/encode")
 @limiter.limit(config.RATE_LIMIT_ENCODE)
-@synchronized_endpoint
-def encode_text(
+async def encode_text(
     encode_request: EncodeRequest, 
-    request: Request, # нужно для rate limiting
+    request: Request,
     _: None = Depends(require_auth)
-    ):
+):
     """
-    Кодирование одного текста в вектор.
+    Кодирование одного текста.
     
-    ВНИМАНИЕ: Этот эндпоинт СИНХРОННЫЙ.
-    
-    Почему синхронный:
-    1. SentenceTransformer.encode() не thread-safe
-    2. FastAPI для синхронных эндпоинтов использует пул потоков (до 40 потоков)
-    3. Без защиты 40 потоков могут одновременно вызвать модель -> SEGFAULT
-    4. Декоратор @synchronized_endpoint захватывает глобальную блокировку
-    5. Только один поток может выполнять encode() в каждый момент времени
-    
-    Как работает последовательность:
-    - Первый запрос захватывает блокировку и начинает encode()
-    - Второй запрос пытается захватить блокировку и ждет
-    - Третий запрос тоже ждет
-    - Когда первый завершается, второй захватывает блокировку и выполняет encode()
-    - И так далее
-    
-    Таким образом, запросы обрабатываются строго последовательно,
-    что гарантирует безопасную работу с не-потокобезопасной моделью.
+    Новое опциональное поле: timeout - сколько клиент готов ждать (секунды)
     """
     try:
-        if not encoder_service.service_available:
-            return {"error": "Encoder service not available", "service_available": False}
-        
         cleaned_text = _clean_text(encode_request.text)
-
-        if encode_request.request_type:
-            if encode_request.request_type == "query":
-                cleaned_text = config.QUERY_PREFIX + cleaned_text
-            elif encode_request.request_type == "document":
-                cleaned_text = config.DOCUMENT_PREFIX + cleaned_text
         
-        # Прямой вызов модели - декоратор гарантирует, что этот код
-        # выполняется только одним потоком в каждый момент времени
-        embedding = encoder_service.encoder.encode(cleaned_text)
-        cleaned_embedding = _clean_embedding(embedding.tolist()) 
+        embedding = await submit_task(
+            task_type=TaskType.ENCODE,
+            data=cleaned_text,
+            request_type=encode_request.request_type,
+            client_timeout=encode_request.timeout  # Передаем таймаут клиента
+        )
         
         return {
-            "embedding": cleaned_embedding,
+            "embedding": embedding,
             "dimension": len(embedding),
             "service_available": True
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Encode endpoint error: {e}")
         return {
             "error": str(e),
-            "service_available": encoder_service.service_available
+            "service_available": worker.encoder is not None
         }
 
 
 @app.post("/encode_batch")
 @limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
-@synchronized_endpoint
-def encode_batch(
+async def encode_batch(
     batch_encode_request: BatchEncodeRequest, 
-    request: Request, # нужно для rate limiting
+    request: Request,
     _: None = Depends(require_auth)
-    ):
+):
     """
     Пакетное кодирование нескольких текстов.
     
-    ВАЖНО: Использует ТУ ЖЕ САМУЮ блокировку, что и /encode.
-    Это значит, что:
-    - Не могут одновременно выполняться /encode и /encode_batch
-    - Все операции с моделью строго последовательны
-    - Batch-обработка не дает выигрыша в параллельности, но дает
-      выигрыш в эффективности использования GPU (один большой батч
-      вместо множества маленьких)
-    
-    Как работает при высокой нагрузке:
-    1. Приходит 10 запросов к /encode и 5 запросов к /encode_batch
-    2. Все они пытаются захватить одну блокировку _model_lock
-    3. Выполняются строго по очереди: encode, encode_batch, encode, ...
-    4. Модель всегда используется одним потоком, race conditions исключены
+    Новое опциональное поле: timeout - сколько клиент готов ждать (секунды)
     """
     try:
-        if not encoder_service.service_available:
-            return {"error": "Encoder service not available", "service_available": False}
+        cleaned_texts = [_clean_text(text) for text in batch_encode_request.texts]
         
-        prefix = None
-        if batch_encode_request.request_type:
-            if batch_encode_request.request_type == "query":
-                prefix = config.QUERY_PREFIX
-            elif batch_encode_request.request_type == "document":
-                prefix = config.DOCUMENT_PREFIX
-        
-        if prefix:
-            cleaned_texts = [prefix + _clean_text(text) for text in batch_encode_request.texts]
-        else:
-            cleaned_texts = [_clean_text(text) for text in batch_encode_request.texts]
-        
-        total_chars = sum(len(text) for text in cleaned_texts)
-        logger.debug(f"Processing batch: {len(cleaned_texts)} texts, {total_chars} total chars")
-        
-        # Прямой batch-вызов модели под защитой той же блокировки
-        embeddings = encoder_service.encoder.encode(cleaned_texts)
-        embeddings_list = [_clean_embedding(embedding.tolist()) for embedding in embeddings]
+        embeddings = await submit_task(
+            task_type=TaskType.ENCODE_BATCH,
+            data=cleaned_texts,
+            request_type=batch_encode_request.request_type,
+            client_timeout=batch_encode_request.timeout  # Передаем таймаут клиента
+        )
         
         return {
-            "embeddings": embeddings_list,
-            "count": len(embeddings_list),
+            "embeddings": embeddings,
+            "count": len(embeddings),
             "service_available": True
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Encode batch endpoint error: {e}")
         return {
             "error": str(e),
-            "service_available": encoder_service.service_available
+            "service_available": worker.encoder is not None
         }
 
 
 @app.get("/vector_size")
 @limiter.limit(config.RATE_LIMIT_INFO)
-def get_vector_size(
-        request: Request, # нужно для rate limiting
-    ):
-    """
-    Возвращает длину вектора в используемой модели
-    """
-    return {"vector_size": encoder_service.encoder_info.model_info.vector_size}
+async def get_vector_size(request: Request):
+    """Размерность вектора"""
+    if worker.encoder:
+        size = worker.encoder.get_sentence_embedding_dimension()
+        return {"vector_size": size}
+    return {"vector_size": None}
 
 
 @app.get("/max_length")
 @limiter.limit(config.RATE_LIMIT_INFO)
-def get_max_length(
-        request: Request, # нужно для rate limiting
-    ):
-    """
-    Возвращает максимальную длину текста (в токенах)
-    """
-    return {"max_length": encoder_service.encoder_info.model_info.max_seq_length}
+async def get_max_length(request: Request):
+    """Максимальная длина текста"""
+    if worker.encoder:
+        return {"max_length": worker.encoder.max_seq_length}
+    return {"max_length": None}
 
 
 @app.get("/health")
 @limiter.limit(config.RATE_LIMIT_INFO)
-async def health_check(
-        request: Request, # нужно для rate limiting
-    ):
-    """
-    Проверка здоровья сервиса.
-    
-    Этот эндпоинт можно оставить async, так как он
-    не использует модель и вызывается редко.
-    """
+async def health_check(request: Request):
+    """Проверка здоровья"""
     return {
-        "status": "healthy" if encoder_service.service_available else "degraded",
-        "encoder_loaded": encoder_service.encoder is not None,
-        "service_available": encoder_service.service_available
+        "status": "healthy" if worker.encoder else "degraded",
+        "encoder_loaded": worker.encoder is not None,
+        "queue_size": input_queue.qsize(),
+        "active_requests": len(dispatcher.active_futures),
+        "service_available": worker.encoder is not None,
+        "max_timeout": MAX_SERVICE_TIMEOUT
     }
 
 
 @app.post("/count_tokens")
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
-@synchronized_endpoint
-def count_tokens(
-        encode_request: EncodeRequest, 
-        request: Request, # нужно для rate limiting
-        _: None = Depends(require_auth)
-    ):
-    """
-    Определение количества токенов в тексте.
-    
-    Токенизатор также не является полностью потокобезопасным,
-    поэтому защищаем его той же блокировкой, что и модель.
-    """
+async def count_tokens(
+    encode_request: EncodeRequest, 
+    request: Request,
+    _: None = Depends(require_auth)
+):
+    """Подсчет токенов в тексте"""
     try:
-        if not encoder_service.service_available:
-            return {"error": "Encoder service not available", "service_available": False}
-        
-        tokens = encoder_service.tokenizer.encode(
-            encode_request.text,
-            add_special_tokens=True,
-            truncation=True
+        token_count = await submit_task(
+            task_type=TaskType.COUNT_TOKENS,
+            data=encode_request.text,
+            client_timeout=encode_request.timeout  # И здесь тоже
         )
-        return {"tokens_count": len(tokens)}
-
+        
+        return {"tokens_count": token_count}
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Count_tokens endpoint error: {e}")
         return {
             "error": str(e),
-            "service_available": encoder_service.service_available
+            "service_available": worker.tokenizer is not None
         }
 
 
 @app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS_BATCH)
-@synchronized_endpoint
-def count_tokens_batch(
+async def count_tokens_batch(
     batch_token_count_request: BatchTokenCountRequest, 
-    request: Request, # нужно для rate limiting
+    request: Request,
     _: None = Depends(require_auth)
 ):
-    """
-    Пакетный подсчет токенов для нескольких текстов за один запрос.
-
-    
-    Возвращает СПИСОК длин для каждого текста в том же порядке.
-    
-    Пример запроса:
-    {
-        "texts": ["короткий текст", "очень длинный текст"]
-    }
-    
-    Пример ответа:
-    {
-        "tokens_counts": [3, 15],
-        "count": 2,
-        "service_available": true
-    }
-    """
+    """Пакетный подсчет токенов"""
     try:
-        if not encoder_service.service_available:
-            return {
-                "tokens_counts": [],
-                "count": 0,
-                "service_available": False
-            }
-        
-        token_counts = []
-        
-        for text in batch_token_count_request.texts:
-            tokens = encoder_service.tokenizer.encode(
-                text,
-                add_special_tokens=True,
-                truncation=True
-            )
-            token_counts.append(len(tokens))
-        
-        logger.debug(f"Batch token count: processed {len(batch_token_count_request.texts)} texts")
+        token_counts = await submit_task(
+            task_type=TaskType.COUNT_TOKENS_BATCH,
+            data=batch_token_count_request.texts,
+            client_timeout=batch_token_count_request.timeout  # И здесь
+        )
         
         return {
-            "tokens_counts": token_counts, 
+            "tokens_counts": token_counts,
             "count": len(token_counts),
             "service_available": True
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Count_tokens_batch endpoint error: {e}")
         return {
             "tokens_counts": [],
             "count": 0,
-            "service_available": encoder_service.service_available
+            "service_available": worker.tokenizer is not None
         }

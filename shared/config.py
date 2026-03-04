@@ -17,6 +17,12 @@ class DefaultConfig:
     LOG_PATH = Path("logs")
     MODEL_PATH = Path("models") / "sentence-transformers"
 
+    # Тайм-ауты сервиса по умолчанию ----------------------------------------------------------
+    ENCODER_BASE_TIMEOUT = int(os.getenv("ENCODER_BASE_TIMEOUT", "15"))
+    ENCODER_BATCH_TIMEOUT = int(os.getenv("ENCODER_BATCH_TIMEOUT", "60"))
+    # жесткий потолок таймаута - сервис НИКОГДА не будет ждать дольше
+    MAX_SERVICE_TIMEOUT = int(os.getenv("MAX_SERVICE_TIMEOUT", "120"))
+
     # Настройки для работы с кокретной эмбеддинговой моделью ----------------------------------
 
     DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"

@@ -22,6 +22,7 @@ class EncodeRequest(BaseModel):
     """
     text: str
     request_type: Optional[str] = "query"  # "query" или "document"
+    timeout: Optional[float] = None # клиент может явно указать тайм-аут
     
     @field_validator('text')
     @classmethod
@@ -56,6 +57,7 @@ class BatchEncodeRequest(BaseModel):
     """
     texts: List[str]
     request_type: Optional[str] = "query"  # "query" или "document"
+    timeout: Optional[float] = None # клиент может явно указать тайм-аут
 
     @field_validator('texts')
     @classmethod
@@ -103,6 +105,7 @@ class BatchTokenCountRequest(BaseModel):
     - MAX_BATCH_TOTAL_CHARS - максимальная суммарная длина
     """
     texts: List[str]
+    timeout: Optional[float] = None # клиент может явно указать тайм-аут
 
     @field_validator('texts')
     @classmethod
