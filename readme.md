@@ -23,27 +23,28 @@
 
 Сервис построен с учетом следующих ключевых требований:
 
-- **Thread-safe работа с моделями** — SentenceTransformer модели не являются потокобезопасными, поэтому все эндпоинты, работающие с моделью, сделаны синхронными. FastAPI автоматически ставит запросы в очередь, гарантируя последовательную обработку.
+- **Thread-safe работа с моделями** — SentenceTransformer модели не являются потокобезопасными, поэтому все эндпоинты, работающие с моделью, сделаны синхронными с глобальной блокировкой, гарантирующей последовательную обработку.
 - **Батчевая обработка** — поддержка пакетного кодирования нескольких текстов за один запрос для оптимальной производительности.
+- **JWT аутентификация** — все рабочие эндпоинты защищены JWT токенами с коротким сроком жизни (30 секунд).
 - **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально для последующих запусков.
 - **Изоляция через HTTP** — сервис работает как отдельный процесс.
 - **Самоидентификация** — каждый экземпляр энкодера имеет уникальное имя и предоставляет информацию о своей модели через отдельный эндпоинт.
 - **Автоопределение параметров** — размер вектора и максимальная длина текста определяются автоматически из загруженной модели.
-- **Защита от перегрузок** — многоуровневая система лимитов: валидация размера запросов + rate limiting по IP/сервисам.
+- **Защита от перегрузок** — многоуровневая система лимитов: валидация размера запросов + rate limiting по IP.
 
 ### API Эндпоинты
 
-Все эндпоинты, работающие с моделью (кроме `/health` и `/info`), требуют заголовок `X-Internal-Secret` для аутентификации.
+**Важно:** Все POST эндпоинты, работающие с моделью (кроме `/health` и `/info`), требуют JWT аутентификацию через заголовок `Authorization: Bearer <token>`.
 
 | Эндпоинт | Метод | Описание | Аутентификация | Rate Limit |
 |----------|-------|----------|----------------|------------|
 | `/info` | GET | Информация об энкодере и его модели | Нет | 500/min |
-| `/encode` | POST | Кодирование одного текста | Да | 200/min |
-| `/encode_batch` | POST | Пакетное кодирование нескольких текстов | Да | 60/min |
-| `/count_tokens` | POST | Подсчет токенов в одном тексте | Да | 200/min |
-| `/count_tokens_batch` | POST | Подсчет токенов для нескольких текстов | Да | 60/min |
-| `/vector_size` | GET | Размерность вектора модели | Да | 500/min |
-| `/max_length` | GET | Максимальная длина текста в токенах | Да | 500/min |
+| `/encode` | POST | Кодирование одного текста | **JWT** | 200/min |
+| `/encode_batch` | POST | Пакетное кодирование нескольких текстов | **JWT** | 60/min |
+| `/count_tokens` | POST | Подсчет токенов в одном тексте | **JWT** | 200/min |
+| `/count_tokens_batch` | POST | Подсчет токенов для нескольких текстов | **JWT** | 60/min |
+| `/vector_size` | GET | Размерность вектора модели | Нет | 500/min |
+| `/max_length` | GET | Максимальная длина текста в токенах | Нет | 500/min |
 | `/health` | GET | Проверка здоровья сервиса | Нет | 500/min |
 
 #### Информация об энкодере (`/info`)
@@ -73,7 +74,7 @@ curl http://localhost:8001/info
 ```bash
 curl -X POST http://localhost:8001/encode \
   -H "Content-Type: application/json" \
-  -H "X-Internal-Secret: your-secret-key" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
   -d '{"text": "Проблема с доступом к почте", "request_type": "query"}'
 ```
 
@@ -90,7 +91,7 @@ curl -X POST http://localhost:8001/encode \
 ```bash
 curl -X POST http://localhost:8001/encode_batch \
   -H "Content-Type: application/json" \
-  -H "X-Internal-Secret: your-secret-key" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
   -d '{"texts": ["текст1", "текст2"], "request_type": "document"}'
 ```
 
@@ -104,18 +105,15 @@ curl -X POST http://localhost:8001/encode_batch \
 
 #### Пакетный подсчет токенов (`/count_tokens_batch`) 🚀
 
-**Новый эндпоинт для эффективной обработки множества текстов.**
-
-Позволяет подсчитать количество токенов для нескольких текстов за один запрос. Это критически важно для производительности при индексации больших документов: например, для 121 чанка с 2 энкодерами заменяет 242 отдельных запроса на всего 2.
+Позволяет подсчитать количество токенов для нескольких текстов за один запрос.
 
 ```bash
 curl -X POST http://localhost:8001/count_tokens_batch \
   -H "Content-Type: application/json" \
-  -H "X-Internal-Secret: your-secret-key" \
-  -d '{"texts": ["короткий текст", "очень длинный текст с множеством слов и предложений"]}'
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -d '{"texts": ["короткий текст", "очень длинный текст"]}'
 ```
 
-**Пример ответа:**
 ```json
 {
     "tokens_counts": [3, 15],
@@ -214,14 +212,6 @@ class BatchEncodeRequest(BaseModel):
         return v
 ```
 
-##### BatchTokenCountRequest
-
-```python
-class BatchTokenCountRequest(BaseModel):
-    texts: List[str]
-    # Та же валидация, что и у BatchEncodeRequest
-```
-
 ##### BatchTokenCountResponse
 
 ```python
@@ -241,10 +231,10 @@ class BatchTokenCountResponse(BaseModel):
 
 Решение:
 - Все эндпоинты, использующие модель, объявлены как **синхронные** (`def`, не `async def`)
-- FastAPI для синхронных эндпоинтов автоматически ставит запросы в очередь
-- Запросы обрабатываются последовательно, гарантируя безопасность
+- Используется глобальная блокировка `threading.Lock()` через декоратор `@synchronized_endpoint`
+- FastAPI для синхронных эндпоинтов использует пул потоков, но блокировка гарантирует, что только один поток одновременно работает с моделью
 
-**Batch-эндпоинты** следуют тому же принципу: внутри одного запроса тексты обрабатываются последовательно, а сам запрос стоит в очереди FastAPI.
+**Batch-эндпоинты** следуют тому же принципу: внутри одного запроса тексты обрабатываются последовательно под той же блокировкой.
 
 ### Лимиты и Rate Limiting
 
@@ -258,26 +248,64 @@ class BatchTokenCountResponse(BaseModel):
 | `MAX_TEXT_LENGTH` | 10000 | Максимальная длина одного текста (символов) |
 | `MAX_TOTAL_BATCH_LENGTH` | 100000 | Максимальная суммарная длина всех текстов в батче |
 
-Эти лимиты предотвращают отправку заведомо невозможных для обработки запросов (например, 10 тысяч текстов по 1 млн символов).
-
 #### 2. Rate Limiting (защита от DDoS)
 
-Ограничивает частоту запросов от одного клиента. Используется in-memory хранилище (не требует Redis).
+Ограничивает частоту запросов от одного клиента. Используется in-memory хранилище.
 
 | Эндпоинт | Лимит | Назначение |
 |----------|-------|------------|
-| `/info`, `/health`, `/vector_size`, `/max_length` | 500/min | Легкие эндпоинты, можно чаще |
+| `/info`, `/health`, `/vector_size`, `/max_length` | 500/min | Легкие эндпоинты |
 | `/encode`, `/count_tokens` | 200/min | Средняя нагрузка |
 | `/encode_batch`, `/count_tokens_batch` | 60/min | Тяжелые операции |
 
-**Как определяется клиент:**
-- Если есть заголовок `X-Internal-Secret` — по первым 8 символам секрета (идентификация сервиса)
-- Если нет — по IP адресу (с поддержкой `X-Forwarded-For`)
+**Как определяется клиент:** по IP адресу (с поддержкой `X-Forwarded-For`)
 
 **При превышении лимита:**
-- Возвращается HTTP 429 Too Many Requests
-- В ответе есть заголовки: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
-- В логах фиксируется факт превышения (без спама)
+- HTTP 429 Too Many Requests
+- Заголовки: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+
+### Аутентификация (JWT)
+
+Для защиты рабочих эндпоинтов используется **JWT (JSON Web Token)** аутентификация:
+
+- **Алгоритм**: HS256
+- **Срок жизни токена**: 30 секунд (защита от replay-атак)
+- **Передача**: заголовок `Authorization: Bearer <token>`
+
+#### Структура JWT токена:
+
+```json
+{
+    "iss": "encoder-client",      // отправитель
+    "iat": 1700000000,            // время выпуска
+    "exp": 1700000030,            // истекает через 30 сек
+    "service": "encoder-client",   // имя сервиса
+    "request_id": "550e8400"      // ID запроса (для трекинга)
+}
+```
+
+#### Пример создания токена на клиенте:
+
+```python
+from shared.auth import create_service_token
+
+token = create_service_token(
+    service_name="rag-worker",
+    extra_payload={"request_id": "12345"}
+)
+# Добавляем в заголовки: {"Authorization": f"Bearer {token}"}
+```
+
+#### Проверка на сервере:
+
+```python
+from shared.auth import require_auth
+
+@app.post("/encode")
+def encode_text(..., _: None = Depends(require_auth)):
+    # Токен автоматически проверен
+    pass
+```
 
 ### Установка и запуск
 
@@ -295,21 +323,21 @@ pip install -r requirements.txt
 ```env
 # Обязательные параметры
 ENCODER_NAME=deepvk
-INTERNAL_API_SECRET=your-secret-key
+INTERNAL_API_SECRET=your-very-secure-secret-key-at-least-32-chars
 HUGGING_FACE_MODEL_NAME=deepvk/USER2-base
 
 # Опционально
-DEVICE=cpu                                # или "mps", "cuda"
-QUERY_PREFIX=search_query:                # Префикс для запросов
-DOCUMENT_PREFIX=search_document:          # Префикс для документов
-PORT=8260                                 # Порт сервиса
+DEVICE=cpu
+QUERY_PREFIX=search_query: 
+DOCUMENT_PREFIX=search_document: 
+PORT=8260
 
-# Лимиты (опционально, есть значения по умолчанию)
+# Лимиты
 MAX_BATCH_SIZE=256
 MAX_TEXT_LENGTH=10000
 MAX_TOTAL_BATCH_LENGTH=100000
 
-# Rate limiting (опционально)
+# Rate limiting
 RATE_LIMIT_INFO=500/minute
 RATE_LIMIT_ENCODE=200/minute
 RATE_LIMIT_ENCODE_BATCH=60/minute
@@ -357,24 +385,14 @@ services:
       - ./logs:/app/logs
     env_file:
       - .env
-    environment:
-      - DOCKER_ENV=false
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
       --port 8260 --host 0.0.0.0 --workers 1
-      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
     mem_limit: 8g
     cpus: '4.0'
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 ```
 
 ### Конфигурация
@@ -384,7 +402,7 @@ services:
 | Параметр | Описание | Значение по умолчанию |
 |----------|----------|----------------------|
 | `ENCODER_NAME` | Уникальное имя экземпляра | "frida" |
-| `INTERNAL_API_SECRET` | Секретный ключ | None (обязательный) |
+| `INTERNAL_API_SECRET` | Секретный ключ для JWT | None (обязательный) |
 | `DEVICE` | Устройство для вычислений | "cpu" |
 | `HUGGING_FACE_MODEL_NAME` | Название модели | "ai-forever/FRIDA" |
 | `QUERY_PREFIX` | Префикс для запросов | "search_query: " |
@@ -414,6 +432,13 @@ services:
 }
 ```
 
+#### 401/403 Unauthorized (ошибка аутентификации)
+```json
+{
+    "detail": "Invalid token: Signature has expired"
+}
+```
+
 #### 429 Too Many Requests (превышен rate limit)
 ```json
 {
@@ -422,10 +447,6 @@ services:
     "service_available": true
 }
 ```
-В ответе также присутствуют заголовки:
-- `X-RateLimit-Limit: 60`
-- `X-RateLimit-Remaining: 0`
-- `X-RateLimit-Reset: 1625097660`
 
 #### 503 Service Unavailable (модель не загружена)
 ```json
@@ -447,34 +468,27 @@ curl http://localhost:8001/health
 curl http://localhost:8001/info
 ```
 
-#### Проверка rate limit (текущее состояние)
-```bash
-# После запроса смотрим заголовки ответа
-X-RateLimit-Limit: 200
-X-RateLimit-Remaining: 199
-X-RateLimit-Reset: 1625097660
-```
-
 ### Производительность
 
-- **Батчевая обработка** — модель эффективно обрабатывает до 256 текстов за один запрос
-- **Пакетный подсчет токенов** — позволяет обрабатывать сотни текстов за 2-3 запроса вместо сотен отдельных
-- **Кэширование моделей** — модели сохраняются на диске и переиспользуются
-- **Общий кэш для нескольких экземпляров** — модели скачиваются один раз
-- **Rate limiting** — защищает от случайных и намеренных перегрузок
+- **Батчевая обработка** — до 256 текстов за один запрос
+- **Пакетный подсчет токенов** — сотни текстов за 2-3 запроса
+- **Кэширование моделей** — на диске, переиспользуются
+- **JWT аутентификация** — минимальные накладные расходы (~1мс на проверку)
 
-**Пример эффективности с учетом rate limiting:**
-- Для индексации документа со 121 чанком и 2 энкодерами:
-  - Без batch: 242 запроса (превысит rate limit в 200/min)
+**Пример эффективности:**
+- Индексация 121 чанка с 2 энкодерами:
+  - Без batch: 242 запроса (превысит rate limit)
   - С batch: 2 запроса (комфортно в лимитах)
 
 ### Безопасность
 
-- **Внутренняя аутентификация** — заголовок `X-Internal-Secret` для всех рабочих эндпоинтов
-- **Rate limiting** — защита от DDoS и случайных перегрузок
-- **Валидация входных данных** — Pydantic модели с проверкой размеров
+- **JWT аутентификация** — все рабочие эндпоинты защищены
+- **Короткое время жизни токена** — 30 секунд, защита от replay-атак
+- **Единый секретный ключ** — общий для всех сервисов
+- **Rate limiting** — защита от DDoS по IP
+- **Валидация входных данных** — Pydantic модели
 - **Очистка текста** — удаление нестандартных символов
-- **Очистка эмбеддингов** — замена NaN на 0, проверка на Inf
+- **Очистка эмбеддингов** — замена NaN на 0
 - **Изоляция контейнеров** — запуск под непривилегированным пользователем
 
 ### Разработка и отладка
@@ -484,12 +498,26 @@ X-RateLimit-Reset: 1625097660
 uvicorn encoder_service.main:app --reload --port 8001
 ```
 
+#### Тестирование аутентификации
+```python
+from shared.auth import create_service_token
+
+# Создаем тестовый токен
+token = create_service_token("test-client")
+print(f"Bearer {token}")
+
+# Используем в запросе
+curl -X POST http://localhost:8260/encode \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "test"}'
+```
+
 #### Тестирование rate limiting
 ```bash
-# Быстрые запросы для проверки лимитов
 for i in {1..10}; do
   curl -X POST http://localhost:8260/encode \
-    -H "X-Internal-Secret: test" \
+    -H "Authorization: Bearer <token>" \
     -H "Content-Type: application/json" \
     -d '{"text": "test"}' \
     -w "\n%{http_code}\n"
@@ -508,10 +536,11 @@ ls -la models/sentence-transformers/
 watch -n 1 nvidia-smi
 ```
 
-**Проверка текущих лимитов:**
-```bash
-curl -I http://localhost:8260/info
-# Смотрим заголовки X-RateLimit-*
+**Декодирование JWT токена (для отладки):**
+```python
+import jwt
+token = "eyJhbGciOiJIUzI1NiIs..."
+print(jwt.decode(token, options={"verify_signature": False}))
 ```
 
 #### Типичные проблемы и решения
@@ -519,9 +548,8 @@ curl -I http://localhost:8260/info
 | Проблема | Решение |
 |----------|---------|
 | Модель не скачивается | Проверьте интернет, `HUGGING_FACE_MODEL_NAME` |
-| Out of memory на GPU | Уменьшите `MAX_BATCH_SIZE` в .env |
-| Слишком много 429 ошибок | Увеличьте лимиты или оптимизируйте клиент (используйте batch) |
-| Конфликт портов | Измените `PORT` в .env |
-| Rate limit не работает | Проверьте, что во все эндпоинты добавлен декоратор `@limiter.limit` |
-| Request validation error | Проверьте размер текста, не превышает ли лимиты |
-| Нет логов в папке | Установите `DOCKER_ENV=false` |
+| Out of memory на GPU | Уменьшите `MAX_BATCH_SIZE` |
+| 403 Invalid signature | Проверьте `INTERNAL_API_SECRET` (должен быть одинаковым везде) |
+| 403 Token expired | Синхронизируйте время на серверах, проверьте `JWT_EXPIRE_SECONDS` |
+| Слишком много 429 | Увеличьте лимиты или используйте batch-эндпоинты |
+| Request validation error | Проверьте размер текста (не превышает лимиты) |
