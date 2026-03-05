@@ -149,7 +149,9 @@ async def lifespan(app: FastAPI):
     dispatcher_task.cancel()
     cleaner_task.cancel()
     
-    # Ждем завершения задач
+    # Закрываем dispatcher (останавливаем executor)
+    await dispatcher.close()
+    
     await asyncio.gather(worker_task, dispatcher_task, cleaner_task, return_exceptions=True)
     logger.info("Encoder Service остановлен")
 
@@ -448,11 +450,13 @@ async def health_check(request: Request):
     Возвращает статус сервиса, информацию о модели,
     размер очереди и количество активных запросов.
     """
+    active_count = await dispatcher.get_active_count()
+    
     return {
         "status": "healthy" if worker.encoder else "degraded",
         "encoder_loaded": worker.encoder is not None,
-        "queue_size": input_queue.qsize(),
-        "active_requests": len(dispatcher.active_futures),
+        "queue_size": input_queue.qsize(),  
+        "active_requests": active_count,     
         "service_available": worker.encoder is not None,
         "max_timeout": MAX_SERVICE_TIMEOUT
     }
