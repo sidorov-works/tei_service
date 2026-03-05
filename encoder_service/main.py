@@ -26,12 +26,17 @@ import time
 from shared.config import config
 from shared.auth import require_auth
 from shared.encoder_models import (
-    EncoderInfo, 
-    EncoderModelInfo,
+    # модели запросов
     EncodeRequest,
     BatchEncodeRequest,
     BatchTokenCountRequest,
-    BatchTokenCountResponse
+    # модели ответов
+    EncodeResponse,
+    BatchEncodeResponse,
+    TokenCountResponse,
+    BatchTokenCountResponse,
+    EncoderInfo,        # ответ эндпойнта /info
+    EncoderModelInfo,   # используется внутри модели EncoderInfo
 )
 
 from encoder_service.worker import (
@@ -341,7 +346,7 @@ async def get_encoder_info(request: Request):
     return encoder_info
 
 
-@app.post("/encode")
+@app.post("/encode", response_model=EncodeResponse)
 @limiter.limit(config.RATE_LIMIT_ENCODE)
 async def encode_text(
     encode_request: EncodeRequest, 
@@ -363,23 +368,22 @@ async def encode_text(
             client_timeout=encode_request.timeout
         )
         
-        return {
-            "embedding": embedding,
-            "dimension": len(embedding),
-            "service_available": True
-        }
+        return EncodeResponse(
+            embedding=embedding,
+            service_available=True
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Encode endpoint error: {e}")
-        return {
-            "error": str(e),
-            "service_available": worker.encoder is not None
-        }
+        logger.error(f"encode endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
 
 
-@app.post("/encode_batch")
+@app.post("/encode_batch", response_model=BatchEncodeResponse)
 @limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
 async def encode_batch(
     batch_encode_request: BatchEncodeRequest, 
@@ -401,20 +405,19 @@ async def encode_batch(
             client_timeout=batch_encode_request.timeout
         )
         
-        return {
-            "embeddings": embeddings,
-            "count": len(embeddings),
-            "service_available": True
-        }
+        return BatchEncodeResponse(
+            embeddings=embeddings,
+            service_available=True
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Encode batch endpoint error: {e}")
-        return {
-            "error": str(e),
-            "service_available": worker.encoder is not None
-        }
+        logger.error(f"encode_batch endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
 
 
 @app.get("/vector_size")
@@ -455,7 +458,7 @@ async def health_check(request: Request):
     }
 
 
-@app.post("/count_tokens")
+@app.post("/count_tokens", response_model=TokenCountResponse)
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
 async def count_tokens(
     encode_request: EncodeRequest, 
@@ -464,22 +467,26 @@ async def count_tokens(
 ):
     """Подсчет количества токенов в тексте."""
     try:
-        token_count = await submit_task(
+        tokens_count = await submit_task(
             task_type=TaskType.COUNT_TOKENS,
             data=encode_request.text,
             client_timeout=encode_request.timeout
         )
         
-        return {"tokens_count": token_count}
+        # return {"tokens_count": tokens_count}
+        return TokenCountResponse(
+            tokens_count=tokens_count,
+            service_available=True
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Count_tokens endpoint error: {e}")
-        return {
-            "error": str(e),
-            "service_available": worker.tokenizer is not None
-        }
+        logger.error(f"count_tokens endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
 
 
 @app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
@@ -491,24 +498,23 @@ async def count_tokens_batch(
 ):
     """Пакетный подсчет токенов для нескольких текстов."""
     try:
-        token_counts = await submit_task(
+        tokens_counts = await submit_task(
             task_type=TaskType.COUNT_TOKENS_BATCH,
             data=batch_token_count_request.texts,
             client_timeout=batch_token_count_request.timeout
         )
         
-        return {
-            "tokens_counts": token_counts,
-            "count": len(token_counts),
-            "service_available": True
-        }
+        return BatchTokenCountResponse(
+            tokens_counts=tokens_counts,
+            service_available=True
+        )
         
     except HTTPException:
         raise
+
     except Exception as e:
-        logger.error(f"Count_tokens_batch endpoint error: {e}")
-        return {
-            "tokens_counts": [],
-            "count": 0,
-            "service_available": worker.tokenizer is not None
-        }
+        logger.error(f"count_tokens_batch endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )

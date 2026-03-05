@@ -1,10 +1,5 @@
 # shared/encoder_models.py
 
-"""
-Pydantic модели для работы с Encoder Service.
-Содержит модели для описания энкодера и его свойств.
-"""
-
 from pydantic import BaseModel, field_validator, computed_field
 from typing import Optional, List
 from shared.config import config
@@ -145,6 +140,28 @@ class BatchTokenCountRequest(BaseModel):
 
 
 # МОДЕЛИ ОТВЕТОВ=====================================================================
+
+class EncodeResponse(BaseModel):
+    embedding: List[float]
+    service_available: bool
+
+    @computed_field
+    @property
+    def dimension(self) -> int:  # длина вектора 
+        return len(self.embedding)
+
+class BatchEncodeResponse(BaseModel):
+    embeddings: List[List[float]]
+    service_available: bool
+
+    @computed_field
+    @property
+    def count(self) -> int:     # количество обработанных текстов (для удобства)
+        return len(self.embeddings)
+
+class TokenCountResponse(BaseModel):
+    tokens_count: int
+    service_available: Optional[bool] = None
     
 class BatchTokenCountResponse(BaseModel):
     """
