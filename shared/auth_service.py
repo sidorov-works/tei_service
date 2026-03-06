@@ -1,79 +1,29 @@
-# shared/auth.py
+# shared/auth-service.py
 
 """
 JWT-based аутентификация для межсервисного взаимодействия.
 Использует HS256 для подписи токенов с коротким сроком жизни.
+
+В данном модуле - функции, необходимые только серверу
 """
 
 from jose import jwt, JWTError
 from fastapi import HTTPException, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 
 from shared.config import config
 
 logger = logging.getLogger(__name__)
 
-# Настройки JWT
-SECRET_KEY = config.INTERNAL_API_SECRET
-ALGORITHM = "HS256"
-# Токен живет 30 секунд - достаточно для межсервисного запроса
-# Это защищает от replay-атак (повторного использования перехваченного токена)
-TOKEN_EXPIRE_SECONDS = 30
-
 # Схема аутентификации - ожидаем токен в заголовке Authorization: Bearer <token>
 security = HTTPBearer(auto_error=False)
 
-
-def create_service_token(
-    service_name: str = "unknown",
-    extra_payload: Optional[Dict[str, Any]] = None
-) -> str:
-    """
-    Создает JWT токен для межсервисной аутентификации.
-    
-    Args:
-        service_name: Идентификатор сервиса-отправителя
-        extra_payload: Дополнительные данные для включения в токен
-    
-    Returns:
-        str: JWT токен
-    
-    Пример payload:
-    ```
-    {
-        "iss": "encoder-client",             # отправитель
-        "iat": 1700000000,                   # время выпуска
-        "exp": 1700000030,                   # истекает через 30 сек
-        "service": "encoder-client",         # сервис
-        "request_id": "550e8400-e29b-41d4"   # можно добавить для trace
-    }
-    ```
-    """
-    current_time = int(time.time())
-    
-    # Базовый payload
-    payload = {
-        "iss": service_name,                          # кто выпустил токен
-        "iat": current_time,                          # когда выпущен
-        "exp": current_time + TOKEN_EXPIRE_SECONDS,   # когда истекает
-        "service": service_name,                      # имя сервиса
-    }
-    
-    # Добавляем дополнительные данные, если есть
-    if extra_payload:
-        payload.update(extra_payload)
-    
-    # Создаем подписанный токен
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    
-    logger.debug(f"Created JWT token for {service_name}, expires in {TOKEN_EXPIRE_SECONDS}s")
-    return token
-
-
 async def verify_jwt_token(
+    secret_key: str = config.INTERNAL_API_SECRET,
+    allowed_algorithms: Optional[List[str]] = config.ALLOWED_JWT_ALGORITHMS,
+    # Список разрешенных JWT алгоритмов
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> Dict[str, Any]:
     """
@@ -104,8 +54,14 @@ async def verify_jwt_token(
         # Декодируем и проверяем подпись
         payload = jwt.decode(
             token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
+            secret_key,
+            # В аргумент algorithms передается список РАЗРЕШЕННЫХ алгоритмов, 
+            # а не конкретное указание на алгоритм, 
+            # котрый был использован для создания подписи (токена).
+            # А конкретный алгоритм, который будет использован для декодирования, 
+            # якобы, уже прописан в заголовке токена (
+            # token header - первая из трех частей строки токена)
+            algorithms=allowed_algorithms
         )
         
         # Дополнительная проверка: токен должен быть выпущен для внутренних сервисов

@@ -11,11 +11,13 @@ load_dotenv(override=True)
 class DefaultConfig:
 
     ENCODER_NAME = os.getenv("ENCODER_NAME", "frida")
-    
-    INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 
     LOG_PATH = Path("logs")
     MODEL_PATH = Path("models") / "sentence-transformers"
+
+    # Безопасность и аутентификация -----------------------------------------------------------
+    INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+    ALLOWED_JWT_ALGORITHMS = x.split(',') if (x := os.getenv("ALLOWED_JWT_ALGORITHMS")) else None
 
     # Тайм-ауты сервиса по умолчанию ----------------------------------------------------------
     ENCODER_BASE_TIMEOUT = int(os.getenv("ENCODER_BASE_TIMEOUT", "15"))

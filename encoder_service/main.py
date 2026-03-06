@@ -24,7 +24,7 @@ import uuid
 import time
 
 from shared.config import config
-from shared.auth import require_auth
+from shared.auth_service import require_auth
 from shared.encoder_models import (
     # модели запросов
     EncodeRequest,
