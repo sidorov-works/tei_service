@@ -42,22 +42,24 @@ def create_service_token(
         str: JWT токен
     
     Пример payload:
+    ```
     {
-        "iss": "encoder-client",           # отправитель
-        "iat": 1700000000,                  # время выпуска
+        "iss": "encoder-client",             # отправитель
+        "iat": 1700000000,                   # время выпуска
         "exp": 1700000030,                   # истекает через 30 сек
         "service": "encoder-client",         # сервис
         "request_id": "550e8400-e29b-41d4"   # можно добавить для trace
     }
+    ```
     """
     current_time = int(time.time())
     
     # Базовый payload
     payload = {
         "iss": service_name,                          # кто выпустил токен
-        "iat": current_time,                           # когда выпущен
-        "exp": current_time + TOKEN_EXPIRE_SECONDS,    # когда истекает
-        "service": service_name,                        # имя сервиса
+        "iat": current_time,                          # когда выпущен
+        "exp": current_time + TOKEN_EXPIRE_SECONDS,   # когда истекает
+        "service": service_name,                      # имя сервиса
     }
     
     # Добавляем дополнительные данные, если есть
@@ -130,7 +132,9 @@ async def verify_jwt_token(
         )
 
 
-# Упрощенная версия для эндпоинтов, где не нужен payload
+# Упрощенная версия для эндпоинтов, 
+# которым не требуется конкретная информация из payload, 
+# а только нужен сам факт аутентификации
 async def require_auth(
     _: Dict[str, Any] = Depends(verify_jwt_token)
 ) -> None:

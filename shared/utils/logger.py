@@ -1,3 +1,13 @@
+# shared/utils/logger.py
+
+"""
+Кастомный логгер с поддержкой:
+- Многопроцессной записи в файл (локальная разработка)
+- Docker-окружения (только stdout)
+- Управления уровнем логирования через config.LOGGING_LEVEL
+- Автоматической подстановки process_name через декоратор
+"""
+
 import logging
 import os
 from concurrent_log_handler import ConcurrentRotatingFileHandler
@@ -11,6 +21,7 @@ from shared.config import config
 def setup_logger(
     name: Optional[str] = None,
     log_file: str = Path(config.LOG_PATH) / "app.log",
+    level: int = logging.DEBUG,  # Добавлен параметр level
     fmt: str = '%(asctime)s | %(levelname)-8s | %(process_name)-12s | %(message)s',
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5
@@ -26,7 +37,7 @@ def setup_logger(
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
         
         logger = logging.getLogger(name)
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(level)  # Используем переданный уровень
         
         # Удаляем старые обработчики
         logger.handlers.clear()
@@ -41,11 +52,13 @@ def setup_logger(
         )
         formatter = logging.Formatter(fmt)
         handler.setFormatter(formatter)
+        handler.setLevel(level)  # Устанавливаем уровень для хендлера
         logger.addHandler(handler)
         
         # Дублируем в консоль с цветами
         console = logging.StreamHandler()
         console.setFormatter(logging.Formatter('%(message)s'))
+        console.setLevel(level)  # Устанавливаем уровень для консоли
         logger.addHandler(console)
         
         return logger
@@ -54,86 +67,56 @@ def setup_logger(
         return logging.getLogger(name or "root")
     
 
-# Логер для докер-окружения
-import logging
-from pythonjsonlogger import jsonlogger
-import socket
-from typing import Optional
-
-def setup_graylog_logger(
-    name: Optional[str] = None,
-    graylog_host: str = "localhost",
-    graylog_port: int = 12201,
-    fmt: str = '%(asctime)s %(levelname)s %(processName)s %(message)s'
-) -> logging.Logger:
-    """
-    Логгер для отправки в Graylog/ELK через GELF.
-    Требует:
-    - pip install python-json-logger pygelf
-    """
-    try:
-        from pygelf import GelfUdpHandler
-        
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.DEBUG)
-        
-        # Удаляем старые обработчики
-        logger.handlers.clear()
-        
-        # JSON-форматтер
-        formatter = jsonlogger.JsonFormatter(fmt)
-        
-        # Graylog handler
-        graylog_handler = GelfUdpHandler(
-            host=graylog_host,
-            port=graylog_port,
-            include_extra_fields=True
-        )
-        graylog_handler.setFormatter(formatter)
-        logger.addHandler(graylog_handler)
-        
-        # Дублируем в консоль для разработки
-        console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter(fmt))
-        logger.addHandler(console)
-        
-        return logger
-    except ImportError:
-        logging.warning("Graylog dependencies not installed. Falling back to console.")
-        return logging.getLogger(name or "root")
-    
-
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """
     Автоматически выбирает оптимальный способ логирования:
-    - В продакшене (DOCKER_ENV=True) отправляет в Graylog
-    - В разработке использует ConcurrentRotatingFileHandler
+    - В продакшене (DOCKER_ENV=True) пишет только в stdout, Docker сам собирает
+    - В разработке использует ConcurrentRotatingFileHandler + консоль
     """
+    log_level = getattr(config, 'LOGGING_LEVEL', 'DEBUG')
+    numeric_level = getattr(logging, log_level.upper() if isinstance(log_level, str) else 'DEBUG', logging.DEBUG)
+    
     if os.environ.get('DOCKER_ENV') == 'true':
-        return setup_graylog_logger(
-            name=name,
-            graylog_host=os.getenv('GRAYLOG_HOST', 'graylog')
-        )
+        # В Docker - только stdout, без файлов
+        logger = logging.getLogger(name)
+        logger.setLevel(numeric_level)
+        logger.handlers.clear()
+        
+        # Единственный handler - stdout
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter(
+            '%(asctime)s | %(levelname)-8s | %(process_name)-12s | %(message)s'
+        ))
+        console.setLevel(numeric_level)
+        logger.addHandler(console)
+        
+        return logger
     else:
-        return setup_logger(name=name)
+        # Вне Docker - пишем в файлы как раньше
+        return setup_logger(
+            name=name,
+            level=numeric_level
+        )
 
-logger = get_logger("my_app") # готовый инстанс для импорта
+# Создаем готовый инстанс для импорта
+logger = get_logger("my_app")
 
 
 def wrap_logger_methods(logger, worker_name: str):
-    """Декоратор для автоматической подстановки process_name"""
+    """Декоратор для автоматической подстановки process_name в extra-поля"""
     def proc_name_dec(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            kwargs.setdefault('extra', {}).update({'process_name': worker_name})
+            # Безопасно добавляем process_name в extra, сохраняя существующие поля
+            extra = kwargs.get('extra', {})
+            extra['process_name'] = worker_name
+            kwargs['extra'] = extra
             return func(*args, **kwargs)
         return wrapper
     
-    # Применяем ко всем нужным методам
-    logger.info = proc_name_dec(logger.info)
-    logger.error = proc_name_dec(logger.error)
-    logger.warning = proc_name_dec(logger.warning)
-    logger.debug = proc_name_dec(logger.debug)
-    logger.critical = proc_name_dec(logger.critical)
+    # Применяем ко всем методам логирования
+    for method_name in ['debug', 'info', 'warning', 'error', 'critical']:
+        method = getattr(logger, method_name)
+        setattr(logger, method_name, proc_name_dec(method))
     
     return logger
