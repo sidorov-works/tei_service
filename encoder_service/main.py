@@ -351,8 +351,8 @@ async def get_encoder_info(request: Request):
 @app.post("/encode", response_model=EncodeResponse)
 @limiter.limit(config.RATE_LIMIT_ENCODE)
 async def encode_text(
-    encode_request: EncodeRequest, 
     request: Request,
+    encode_request: EncodeRequest, 
     _: None = Depends(require_auth)
 ):
     """
@@ -388,8 +388,8 @@ async def encode_text(
 @app.post("/encode_batch", response_model=BatchEncodeResponse)
 @limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
 async def encode_batch(
-    batch_encode_request: BatchEncodeRequest, 
     request: Request,
+    batch_encode_request: BatchEncodeRequest, 
     _: None = Depends(require_auth)
 ):
     """
@@ -465,8 +465,8 @@ async def health_check(request: Request):
 @app.post("/count_tokens", response_model=TokenCountResponse)
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
 async def count_tokens(
-    encode_request: EncodeRequest, 
     request: Request,
+    encode_request: EncodeRequest, 
     _: None = Depends(require_auth)
 ):
     """Подсчет количества токенов в тексте."""
@@ -492,12 +492,11 @@ async def count_tokens(
             detail=f"Internal error: {str(e)}"
         )
 
-
 @app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
 @limiter.limit(config.RATE_LIMIT_COUNT_TOKENS_BATCH)
 async def count_tokens_batch(
-    batch_token_count_request: BatchTokenCountRequest, 
     request: Request,
+    batch_token_count_request: BatchTokenCountRequest, 
     _: None = Depends(require_auth)
 ):
     """Пакетный подсчет токенов для нескольких текстов."""

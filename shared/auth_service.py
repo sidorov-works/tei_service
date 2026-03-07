@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
 async def verify_jwt_token(
-    secret_key: str = config.INTERNAL_API_SECRET,
-    allowed_algorithms: Optional[List[str]] = config.ALLOWED_JWT_ALGORITHMS,
-    # Список разрешенных JWT алгоритмов
+    # Явное добавление параметра request: Request в зависимость - решение проблемы 
+    # "конфликта за тело запроса": FastAPI видит, что request уже используется 
+    # в зависимости. Это говорит FastAPI: "не блокируй парсинг тела для основного эндпоинта, 
+    # потому что request уже обрабатывается на уровне зависимости"
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> Dict[str, Any]:
     """
@@ -54,29 +56,26 @@ async def verify_jwt_token(
         # Декодируем и проверяем подпись
         payload = jwt.decode(
             token,
-            secret_key,
+            config.INTERNAL_API_SECRET,
             # В аргумент algorithms передается список РАЗРЕШЕННЫХ алгоритмов, 
             # а не конкретное указание на алгоритм, 
             # котрый был использован для создания подписи (токена).
             # А конкретный алгоритм, который будет использован для декодирования, 
             # якобы, уже прописан в заголовке токена (
             # token header - первая из трех частей строки токена)
-            algorithms=allowed_algorithms
+            algorithms=config.ALLOWED_JWT_ALGORITHMS
         )
         
         # Дополнительная проверка: токен должен быть выпущен для внутренних сервисов
         # Можно проверять конкретные значения, если нужно
         issuer = payload.get("iss")
         if not issuer:
-            logger.warning("Token missing issuer")
             raise HTTPException(
                 status_code=403,
                 detail="Invalid token: missing issuer"
             )
         
-        # Логируем успешную аутентификацию (для отладки)
         logger.debug(f"JWT token verified for service: {issuer}")
-        
         return payload
         
     except JWTError as e:
@@ -86,7 +85,7 @@ async def verify_jwt_token(
             status_code=403,
             detail=f"Invalid token: {str(e)}"
         )
-
+    
 
 # Упрощенная версия для эндпоинтов, 
 # которым не требуется конкретная информация из payload, 
