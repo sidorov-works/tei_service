@@ -1,7 +1,3 @@
-Отлично! Вот полная актуальная документация, соответствующая текущему коду, с подробным описанием запуска:
-
-##
-
 # Encoder Service
 
 Сервис векторизации текста, предоставляющий HTTP API для получения эмбеддингов через FastAPI. Использует модели на базе SentenceTransformers для преобразования текста в векторные представления.
@@ -33,17 +29,17 @@
   - FastAPI эндпоинты принимают запросы и ставят их в очередь `input_queue`
   - Один выделенный воркер (`ModelWorker`) последовательно обрабатывает задачи, имея эксклюзивный доступ к модели
   - Диспетчер результатов (`ResultDispatcher`) направляет ответы ожидающим запросам через `asyncio.Future`
-  - Все операции с Future, которые могут вызвать колбэки, выносятся в отдельные потоки через `asyncio.to_thread`
+  - Все операции с Future, которые могут вызвать колбэки, выносятся в отдельные потоки через `ThreadPoolExecutor`
 
 - **Батчевая обработка** — поддержка пакетного кодирования нескольких текстов за один запрос для оптимальной производительности.
 
 - **Гибкие таймауты** — клиент может указать желаемое время ожидания (`timeout` в теле запроса), сервис уважает этот таймаут (в пределах своего жесткого потолка).
 
-- **JWT аутентификация** — все рабочие эндпоинты защищены JWT токенами с коротким сроком жизни (30 секунд).
+- **JWT аутентификация** — все рабочие эндпоинты защищены JWT токенами с коротким сроком жизни (по умолчанию 30 секунд).
 
 - **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально в `models/sentence-transformers/`.
 
-- **Защита от перегрузок** — очередь запросов с максимальным размером (1000 задач) и валидация размера входящих данных.
+- **Защита от перегрузок** — очередь запросов с максимальным размером (1000 задач) и валидация размера входящих данных. При заполнении очереди > 900 новые запросы получают 503 Service Unavailable.
 
 ### API Эндпоинты
 
@@ -122,6 +118,45 @@ curl -X POST http://localhost:8260/encode_batch \
 }
 ```
 
+#### Подсчет токенов (`/count_tokens`)
+
+```bash
+curl -X POST http://localhost:8260/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -d '{
+    "text": "Пример текста для подсчета токенов",
+    "timeout": 15
+  }'
+```
+
+```json
+{
+    "tokens_count": 8,
+    "service_available": true
+}
+```
+
+#### Пакетный подсчет токенов (`/count_tokens_batch`)
+
+```bash
+curl -X POST http://localhost:8260/count_tokens_batch \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -d '{
+    "texts": ["текст1", "текст2"],
+    "timeout": 30
+  }'
+```
+
+```json
+{
+    "tokens_counts": [5, 8],
+    "count": 2,
+    "service_available": true
+}
+```
+
 #### Проверка здоровья (`/health`)
 
 ```bash
@@ -161,10 +196,19 @@ curl http://localhost:8260/health
 }
 ```
 
+#### BatchTokenCountRequest
+
+```python
+{
+    "texts": ["string1", "string2"],  # обязательное, 1-256 текстов
+    "timeout": 30.0                    # опционально
+}
+```
+
 Валидация:
 - Количество текстов ≤ `MAX_BATCH_SIZE` (256)
 - Каждый текст не пустой и ≤ `MAX_TEXT_LENGTH` (10000 символов)
-- Суммарная длина ≤ `MAX_TOTAL_BATCH_LENGTH` (100000 символов)
+- Суммарная длина ≤ `MAX_TOTAL_BATCH_LENGTH` (500000 символов)
 
 ### Управление таймаутами
 
@@ -196,8 +240,6 @@ else:
 - **Диспетчер результатов** направляет ответы от воркера к ожидающим Future
 - Для избежания блокировки event loop, операции с Future (`set_result`, `set_exception`) выполняются в отдельных потоках через `ThreadPoolExecutor`
 
-Абсолютно верно! Это важный момент - документация должна объяснять, как работать с сервисом **без** использования готового клиента. Добавлю раздел:
-
 ### Аутентификация и подпись запросов
 
 Все POST эндпоинты (`/encode`, `/encode_batch`, `/count_tokens`, `/count_tokens_batch`) требуют JWT-аутентификацию. Токен передается в заголовке `Authorization: Bearer <token>`.
@@ -216,7 +258,7 @@ else:
 ```
 
 **Важно:**
-- `exp` должно быть не более чем через 30 секунд после `iat`
+- `exp` должно быть не более чем через 30 секунд после `iat` (значение по умолчанию)
 - Часы клиента и сервера должны быть синхронизированы (допустимое расхождение - несколько секунд)
 
 #### 2. Генерация токена (примеры на разных языках)
@@ -265,66 +307,6 @@ const token = createToken('rag-worker');
 const headers = { 'Authorization': `Bearer ${token}` };
 ```
 
-##### Go
-```go
-package main
-
-import (
-    "time"
-    "github.com/golang-jwt/jwt/v5"
-)
-
-var secretKey = []byte("your-32-char-secret-key-minimum")
-
-func createToken(serviceName string) (string, error) {
-    currentTime := time.Now().Unix()
-    claims := jwt.MapClaims{
-        "iss":     serviceName,
-        "iat":     currentTime,
-        "exp":     currentTime + 30,
-        "service": serviceName,
-    }
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString(secretKey)
-}
-
-// Использование
-token, _ := createToken("rag-worker")
-headers := map[string]string{"Authorization": "Bearer " + token}
-```
-
-##### Java
-```java
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.SignatureAlgorithm;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.Map;
-
-public class JwtUtil {
-    private static final String SECRET_KEY = "your-32-char-secret-key-minimum";
-    
-    public static String createToken(String serviceName) {
-        long currentTime = System.currentTimeMillis() / 1000;
-        
-        Map<String, Object> claims = new HashMap<>();
-        claims.put("iss", serviceName);
-        claims.put("iat", currentTime);
-        claims.put("exp", currentTime + 30);
-        claims.put("service", serviceName);
-        
-        return Jwts.builder()
-            .setClaims(claims)
-            .signWith(SignatureAlgorithm.HS256, SECRET_KEY.getBytes())
-            .compact();
-    }
-}
-
-// Использование
-String token = JwtUtil.createToken("rag-worker");
-// Добавить в заголовок: "Authorization: Bearer " + token
-```
-
 ##### curl (для тестирования)
 ```bash
 # Сначала нужно сгенерировать токен (можно использовать Python одним выражением)
@@ -355,25 +337,9 @@ curl -X POST http://localhost:8260/encode \
 
 1. **Секретный ключ** должен быть одинаковым на всех сервисах, которые общаются друг с другом
 2. **Синхронизация времени** - все сервисы должны иметь синхронизированные часы (NTP)
-3. **Короткое время жизни** - 30 секунд достаточно для HTTP запроса, но слишком мало для ручного тестирования curl. Для отладки можно временно увеличить `JWT_EXPIRE_SECONDS` в коде сервиса
-4. **Request ID** - рекомендуется добавлять уникальный ID запроса в токен для trace:
-   ```python
-   payload = {
-       ...,
-       "request_id": str(uuid.uuid4())[:8]
-   }
-   ```
+3. **Короткое время жизни** - 30 секунд достаточно для HTTP запроса, но слишком мало для ручного тестирования curl. Для отладки можно временно увеличить `JWT_EXPIRE_SECONDS` в конфигурации клиента
 
-#### 5. Без использования encoder-client
-
-Если вы не используете готовый Python-клиент `encoder_client`, вам нужно:
-
-1. **Сгенерировать JWT токен** для каждого запроса (токены живут 30 секунд)
-2. **Добавить токен** в заголовок `Authorization: Bearer <token>`
-3. **Отправить запрос** с правильным телом и заголовками
-4. **Обработать ответ**, учитывая возможные 403 ошибки (истекший токен)
-
-Пример полного цикла на Python без использования клиента:
+#### 5. Пример полного цикла на Python без использования клиента
 
 ```python
 import httpx
@@ -399,20 +365,22 @@ class SimpleEncoderClient:
         }
         return jwt.encode(payload, self.secret_key, algorithm="HS256")
     
-    async def encode(self, text: str, request_type: str = "query") -> List[float]:
+    async def encode(self, text: str, request_type: str = "query", timeout: Optional[float] = None) -> List[float]:
         """Кодирование одного текста"""
         url = f"{self.base_url}/encode"
         token = self._create_token()
         
+        json_data = {"text": text, "request_type": request_type}
+        if timeout:
+            json_data["timeout"] = timeout
+        
         response = await self.client.post(
             url,
-            json={"text": text, "request_type": request_type},
+            json=json_data,
             headers={"Authorization": f"Bearer {token}"}
         )
         
         if response.status_code == 403:
-            # Токен мог истечь - можно повторить с новым токеном
-            # Но в нашем случае токен свежий, значит проблема в ключе
             raise Exception(f"Auth failed: {response.json()}")
         
         response.raise_for_status()
@@ -428,13 +396,11 @@ async def main():
         secret_key="your-32-char-secret-key-minimum"
     )
     
-    embedding = await client.encode("пример текста")
+    embedding = await client.encode("пример текста", timeout=15)
     print(f"Получен вектор размерностью {len(embedding)}")
     
     await client.close()
 ```
-
-Этот подход можно реализовать на любом языке программирования - главное правильно сформировать JWT токен.
 
 ### Установка и запуск
 
@@ -560,6 +526,7 @@ services:
       - .env.frida    # специфичные для FRIDA
     environment:
       - PORT=8260
+      - DOCKER_ENV=false
     container_name: encoder_frida
     restart: unless-stopped
     command: >
@@ -593,6 +560,7 @@ services:
       - .env.deepvk
     environment:
       - PORT=8261
+      - DOCKER_ENV=false
     container_name: encoder_deepvk
     restart: unless-stopped
     command: >
@@ -632,7 +600,13 @@ docker-compose up -d
 | **Лимиты** |
 | `MAX_BATCH_SIZE` | Макс. текстов в батче | 256 |
 | `MAX_TEXT_LENGTH` | Макс. длина текста (символов) | 10000 |
-| `MAX_TOTAL_BATCH_LENGTH` | Макс. суммарная длина | 100000 |
+| `MAX_TOTAL_BATCH_LENGTH` | Макс. суммарная длина | 500000 |
+| **Rate limiting** |
+| `RATE_LIMIT_INFO` | Лимит для /info, /health | "500/minute" |
+| `RATE_LIMIT_ENCODE` | Лимит для /encode | "500/minute" |
+| `RATE_LIMIT_ENCODE_BATCH` | Лимит для /encode_batch | "150/minute" |
+| `RATE_LIMIT_COUNT_TOKENS` | Лимит для /count_tokens | "600/minute" |
+| `RATE_LIMIT_COUNT_TOKENS_BATCH` | Лимит для /count_tokens_batch | "200/minute" |
 | **Пути** |
 | `LOG_PATH` | Директория для логов | "logs" |
 | `MODEL_PATH` | Директория для моделей | "models/sentence-transformers" |
@@ -652,7 +626,14 @@ MAX_SERVICE_TIMEOUT=120
 # Лимиты
 MAX_BATCH_SIZE=256
 MAX_TEXT_LENGTH=10000
-MAX_TOTAL_BATCH_LENGTH=100000
+MAX_TOTAL_BATCH_LENGTH=500000
+
+# Rate limiting
+RATE_LIMIT_INFO=500/minute
+RATE_LIMIT_ENCODE=500/minute
+RATE_LIMIT_ENCODE_BATCH=150/minute
+RATE_LIMIT_COUNT_TOKENS=600/minute
+RATE_LIMIT_COUNT_TOKENS_BATCH=200/minute
 ```
 
 **.env.frida:**

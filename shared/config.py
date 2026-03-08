@@ -41,7 +41,7 @@ class DefaultConfig:
     # Максимально допустимое кол-во текстов в батче.
     # Предполагается, что модель Sentence Transformers сама поделит большой батч на порции,
     # однако, для подстраховки от переполнения памяти введем предварительное ограничение
-    MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "10000"))
+    MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "256"))
 
     # Максимально допустимая длина одного текста в запросе. 
     # Этот параметр не связан напрямую со свойством max_seq_len конкретной эмбеддинговой модели 
@@ -50,7 +50,7 @@ class DefaultConfig:
     MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "10000"))
 
     # Максимально допустимая суммарная длина текстов в батче
-    MAX_TOTAL_BATCH_LENGTH = int(os.getenv("MAX_TOTAL_BATCH_LENGTH", "100000"))
+    MAX_TOTAL_BATCH_LENGTH = int(os.getenv("MAX_TOTAL_BATCH_LENGTH", "500000"))
 
     # Rate limiting и защита от Ddos ---------------------------------------------------------
     RATE_LIMIT_INFO = os.getenv("RATE_LIMIT_INFO", "500/minute")                
