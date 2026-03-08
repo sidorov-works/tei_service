@@ -1,4 +1,4 @@
-# shared/auth-service.py
+# shared/auth_service.py
 
 """
 JWT-based аутентификация для межсервисного взаимодействия.
@@ -11,11 +11,8 @@ from jose import jwt, JWTError
 from fastapi import HTTPException, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Dict, Any, List
-import logging
-
+from shared.utils.logger import logger
 from shared.config import config
-
-logger = logging.getLogger(__name__)
 
 # Схема аутентификации - ожидаем токен в заголовке Authorization: Bearer <token>
 security = HTTPBearer(auto_error=False)
@@ -90,7 +87,7 @@ async def verify_jwt_token(
 # Упрощенная версия для эндпоинтов, 
 # которым не требуется конкретная информация из payload, 
 # а только нужен сам факт аутентификации
-async def require_auth(
+async def require_jwt_auth(
     _: Dict[str, Any] = Depends(verify_jwt_token)
 ) -> None:
     """
@@ -103,3 +100,35 @@ async def require_auth(
         ...
     """
     pass
+
+async def require_header_secret(
+    # Явное добавление параметра request: Request в зависимость - решение проблемы 
+    # "конфликта за тело запроса": FastAPI видит, что request уже используется 
+    # в зависимости. Это говорит FastAPI: "не блокируй парсинг тела для основного эндпоинта, 
+    # потому что request уже обрабатывается на уровне зависимости"
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Зависимость FastAPI для проверки секретного заголовка.
+    
+    Использование в эндпоинтах:
+    @app.post("/encode")
+    async def encode(..., _ = Depends(require_header_secret)):
+    
+    Raises:
+        HTTPException 403: Если секретный заголовок отсутствует или не совпадает
+    """
+    # Проверяем, что токен вообще предоставлен
+    if not credentials:
+        logger.warning("No authorization credentials provided")
+        raise HTTPException(
+            status_code=403,
+            detail="Missing API secret key"
+        )
+    
+    API_SECRET = credentials.credentials
+    
+    if API_SECRET != config.INTERNAL_API_SECRET:
+        logger.warning(f"Invalid API secret")
+        raise HTTPException(status_code=403, detail="Forbidden")

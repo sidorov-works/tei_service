@@ -1,3 +1,4 @@
+
 # Encoder Service
 
 Сервис векторизации текста, предоставляющий HTTP API для получения эмбеддингов через FastAPI. Использует модели на базе SentenceTransformers для преобразования текста в векторные представления.
@@ -10,6 +11,9 @@
 - [Лимиты и валидация](#лимиты-и-валидация)
 - [Очередь и многопоточность](#очередь-и-многопоточность)
 - [Аутентификация и подпись запросов](#аутентификация-и-подпись-запросов)
+  - [Выбор метода аутентификации](#выбор-метода-аутентификации)
+  - [JWT-аутентификация (режим по умолчанию)](#jwt-аутентификация-режим-по-умолчанию)
+  - [Аутентификация по секретному заголовку](#аутентификация-по-секретному-заголовку)
 - [Установка и запуск](#установка-и-запуск)
   - [Локальный запуск](#локальный-запуск)
   - [Запуск с honcho (Procfile)](#запуск-с-honcho-procfile)
@@ -20,6 +24,7 @@
   - [Примеры .env файлов](#примеры-env-файлов)
 - [Мониторинг](#мониторинг)
 - [Безопасность](#безопасность)
+- [Клиентская библиотека (Encoder Client)](#клиентская-библиотека-encoder-client)
 
 ### Архитектура
 
@@ -35,7 +40,7 @@
 
 - **Гибкие таймауты** — клиент может указать желаемое время ожидания (`timeout` в теле запроса), сервис уважает этот таймаут (в пределах своего жесткого потолка).
 
-- **JWT аутентификация** — все рабочие эндпоинты защищены JWT токенами с коротким сроком жизни (по умолчанию 30 секунд).
+- **JWT аутентификация** — все рабочие эндпоинты защищены. Поддерживается два режима: JWT-токены с коротким сроком жизни (по умолчанию 30 секунд) или статический секретный заголовок для разработки.
 
 - **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально в `models/sentence-transformers/`.
 
@@ -43,18 +48,18 @@
 
 ### API Эндпоинты
 
-**Важно:** Все POST эндпоинты требуют JWT аутентификацию через заголовок `Authorization: Bearer <token>`.
+**Важно:** Все POST эндпоинты требуют аутентификации (JWT или секретный заголовок) через заголовок `Authorization: Bearer <token>`.
 
 | Эндпоинт | Метод | Описание |
 |----------|-------|----------|
-| `/info` | GET | Информация об энкодере и его модели |
+| `/info` | GET | Информация об энкодере и его модели (не требует аутентификации) |
 | `/encode` | POST | Кодирование одного текста |
 | `/encode_batch` | POST | Пакетное кодирование нескольких текстов |
 | `/count_tokens` | POST | Подсчет токенов в одном тексте |
 | `/count_tokens_batch` | POST | Подсчет токенов для нескольких текстов |
-| `/vector_size` | GET | Размерность вектора модели |
-| `/max_length` | GET | Максимальная длина текста в токенах |
-| `/health` | GET | Проверка здоровья сервиса |
+| `/vector_size` | GET | Размерность вектора модели (не требует аутентификации) |
+| `/max_length` | GET | Максимальная длина текста в токенах (не требует аутентификации) |
+| `/health` | GET | Проверка здоровья сервиса (не требует аутентификации) |
 
 #### Информация об энкодере (`/info`)
 
@@ -192,7 +197,7 @@ curl http://localhost:8260/health
 {
     "texts": ["string1", "string2"],  # обязательное, 1-256 текстов
     "request_type": "query",           # опционально
-    "timeout": 60.0                     # опционально
+    "timeout": 60.0                    # опционально
 }
 ```
 
@@ -242,9 +247,30 @@ else:
 
 ### Аутентификация и подпись запросов
 
-Все POST эндпоинты (`/encode`, `/encode_batch`, `/count_tokens`, `/count_tokens_batch`) требуют JWT-аутентификацию. Токен передается в заголовке `Authorization: Bearer <token>`.
+#### Выбор метода аутентификации
 
-#### 1. Формат токена
+Encoder Service поддерживает два метода аутентификации, которые переключаются простым изменением импорта в `main.py`:
+
+```python
+# Вариант 1: JWT-токены (рекомендуется для production)
+from shared.auth_service import require_jwt_auth as require_auth
+
+# Вариант 2: Статический секретный заголовок (для разработки и тестирования)
+# from shared.auth_service import require_header_secret as require_auth
+```
+
+**JWT-аутентификация**:
+- Более безопасна благодаря короткоживущим токенам (30 секунд)
+- Защищает от replay-атак
+- Требует синхронизации времени между сервисами
+
+**Аутентификация по секретному заголовку**:
+- Проще в реализации и отладке
+- Подходит для разработки и тестирования
+- Менее безопасна (статический ключ)
+- Использует тот же `INTERNAL_API_SECRET`, но передает его напрямую в заголовке
+
+#### JWT-аутентификация (режим по умолчанию)
 
 Токен должен быть подписан с использованием HS256 и содержать следующие поля:
 
@@ -261,34 +287,29 @@ else:
 - `exp` должно быть не более чем через 30 секунд после `iat` (значение по умолчанию)
 - Часы клиента и сервера должны быть синхронизированы (допустимое расхождение - несколько секунд)
 
-#### 2. Генерация токена (примеры на разных языках)
+##### Генерация токена (примеры на разных языках)
 
-##### Python
+**Python**
 ```python
 import time
 import jwt
 
-SECRET_KEY = "your-32-char-secret-key-minimum"  # должен совпадать с INTERNAL_API_SECRET на сервере
+SECRET_KEY = "your-32-char-secret-key-minimum"  # должен совпадать с INTERNAL_API_SECRET
 
 def create_token(service_name: str = "my-service") -> str:
     current_time = int(time.time())
     payload = {
         "iss": service_name,
         "iat": current_time,
-        "exp": current_time + 30,  # 30 секунд
+        "exp": current_time + 30,
         "service": service_name
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-# Использование
-token = create_token("rag-worker")
-headers = {"Authorization": f"Bearer {token}"}
 ```
 
-##### JavaScript/Node.js
+**JavaScript/Node.js**
 ```javascript
 const jwt = require('jsonwebtoken');
-
 const SECRET_KEY = 'your-32-char-secret-key-minimum';
 
 function createToken(serviceName = 'my-service') {
@@ -296,110 +317,30 @@ function createToken(serviceName = 'my-service') {
     const payload = {
         iss: serviceName,
         iat: currentTime,
-        exp: currentTime + 30,  // 30 секунд
+        exp: currentTime + 30,
         service: serviceName
     };
     return jwt.sign(payload, SECRET_KEY, { algorithm: 'HS256' });
 }
-
-// Использование
-const token = createToken('rag-worker');
-const headers = { 'Authorization': `Bearer ${token}` };
 ```
 
-##### curl (для тестирования)
-```bash
-# Сначала нужно сгенерировать токен (можно использовать Python одним выражением)
-TOKEN=$(python3 -c "
-import time, jwt
-payload = {'iss': 'curl-client', 'iat': int(time.time()), 
-           'exp': int(time.time()) + 30, 'service': 'curl-client'}
-print(jwt.encode(payload, 'your-32-char-secret-key-minimum', algorithm='HS256'))
-")
+##### Возможные ошибки JWT
 
-# Затем использовать в запросе
+| Код | Ответ | Причина |
+|-----|-------|---------|
+| 403 | `{"detail": "Missing authentication token"}` | Отсутствует заголовок Authorization |
+| 403 | `{"detail": "Invalid token: Signature verification failed"}` | Неправильный секретный ключ |
+| 403 | `{"detail": "Invalid token: Signature has expired"}` | Токен просрочен |
+
+#### Аутентификация по секретному заголовку
+
+При использовании этого режима клиент просто передает статический секретный ключ в заголовке:
+
+```bash
 curl -X POST http://localhost:8260/encode \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer your-32-char-secret-key-minimum" \
   -d '{"text": "пример текста"}'
-```
-
-#### 3. Возможные ошибки и их обработка
-
-| Код | Ответ | Причина | Действие |
-|-----|-------|---------|----------|
-| 403 | `{"detail": "Missing authentication token"}` | Отсутствует заголовок Authorization | Добавить токен |
-| 403 | `{"detail": "Invalid token: Signature verification failed"}` | Неправильный секретный ключ или алгоритм | Проверить `INTERNAL_API_SECRET` |
-| 403 | `{"detail": "Invalid token: Signature has expired"}` | Токен просрочен (exp < now) | Сгенерировать новый токен |
-| 403 | `{"detail": "Invalid token: The specified alg value is not allowed"}` | Используется не HS256 | Проверить алгоритм подписи |
-
-#### 4. Важные замечания
-
-1. **Секретный ключ** должен быть одинаковым на всех сервисах, которые общаются друг с другом
-2. **Синхронизация времени** - все сервисы должны иметь синхронизированные часы (NTP)
-3. **Короткое время жизни** - 30 секунд достаточно для HTTP запроса, но слишком мало для ручного тестирования curl. Для отладки можно временно увеличить `JWT_EXPIRE_SECONDS` в конфигурации клиента
-
-#### 5. Пример полного цикла на Python без использования клиента
-
-```python
-import httpx
-import time
-import jwt
-from typing import List, Optional
-
-class SimpleEncoderClient:
-    def __init__(self, base_url: str, secret_key: str, service_name: str = "my-service"):
-        self.base_url = base_url.rstrip('/')
-        self.secret_key = secret_key
-        self.service_name = service_name
-        self.client = httpx.AsyncClient(timeout=30.0)
-    
-    def _create_token(self) -> str:
-        """Создает свежий JWT токен"""
-        current_time = int(time.time())
-        payload = {
-            "iss": self.service_name,
-            "iat": current_time,
-            "exp": current_time + 30,
-            "service": self.service_name
-        }
-        return jwt.encode(payload, self.secret_key, algorithm="HS256")
-    
-    async def encode(self, text: str, request_type: str = "query", timeout: Optional[float] = None) -> List[float]:
-        """Кодирование одного текста"""
-        url = f"{self.base_url}/encode"
-        token = self._create_token()
-        
-        json_data = {"text": text, "request_type": request_type}
-        if timeout:
-            json_data["timeout"] = timeout
-        
-        response = await self.client.post(
-            url,
-            json=json_data,
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        
-        if response.status_code == 403:
-            raise Exception(f"Auth failed: {response.json()}")
-        
-        response.raise_for_status()
-        return response.json()["embedding"]
-    
-    async def close(self):
-        await self.client.aclose()
-
-# Использование
-async def main():
-    client = SimpleEncoderClient(
-        base_url="http://localhost:8260",
-        secret_key="your-32-char-secret-key-minimum"
-    )
-    
-    embedding = await client.encode("пример текста", timeout=15)
-    print(f"Получен вектор размерностью {len(embedding)}")
-    
-    await client.close()
 ```
 
 ### Установка и запуск
@@ -435,7 +376,7 @@ uvicorn encoder_service.main:app \
 
 #### Запуск с honcho (Procfile)
 
-Для разработки удобно использовать honcho, который запускает сервис с правильными параметрами:
+Для разработки удобно использовать honcho:
 
 ```
 # Procfile
@@ -446,7 +387,7 @@ encoder_service: uvicorn encoder_service.main:app \
   --timeout-graceful-shutdown 10
 ```
 
-Запуск с конкретным .env файлом:
+Запуск:
 ```bash
 # Для модели FRIDA
 honcho start -f Procfile -e .env.frida
@@ -497,12 +438,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://127.0.0.1:${PORT:-8260}/health || exit 1
 ```
 
-Сборка образа:
+Сборка:
 ```bash
-# Сборка базового образа
 docker build -f dockerfile.base -t encoder-base:latest .
-
-# Сборка сервисного образа
 docker build -f dockerfile.service -t encoder-service:latest .
 ```
 
@@ -511,7 +449,6 @@ docker build -f dockerfile.service -t encoder-service:latest .
 ```yaml
 # docker-compose.yml
 services:
-  # Первый экземпляр (FRIDA)
   encoder-frida:
     build:
       context: .
@@ -522,21 +459,16 @@ services:
       - ./models:/app/models
       - ./logs/encoder-frida:/app/logs
     env_file:
-      - .env          # общие параметры
-      - .env.frida    # специфичные для FRIDA
+      - .env
+      - .env.frida
     environment:
       - PORT=8260
-      - DOCKER_ENV=false
     container_name: encoder_frida
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
       --port 8260 --host 0.0.0.0 --workers 1
-      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
-    init: true
-    shm_size: '2gb'
-    mem_limit: 8g
-    cpus: '4.0'
+      --lifespan on --timeout-graceful-shutdown 15
     deploy:
       resources:
         reservations:
@@ -545,7 +477,6 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Второй экземпляр (deepvk)
   encoder-deepvk:
     build:
       context: .
@@ -560,17 +491,12 @@ services:
       - .env.deepvk
     environment:
       - PORT=8261
-      - DOCKER_ENV=false
     container_name: encoder_deepvk
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
       --port 8261 --host 0.0.0.0 --workers 1
-      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
-    init: true
-    shm_size: '2gb'
-    mem_limit: 8g
-    cpus: '4.0'
+      --lifespan on --timeout-graceful-shutdown 15
 ```
 
 Запуск:
@@ -585,7 +511,7 @@ docker-compose up -d
 | Параметр | Описание | Значение по умолчанию |
 |----------|----------|----------------------|
 | **Обязательные** |
-| `INTERNAL_API_SECRET` | Секретный ключ для JWT | **Нет значения** |
+| `INTERNAL_API_SECRET` | Секретный ключ для аутентификации | **Нет значения** |
 | **Идентификация** |
 | `ENCODER_NAME` | Уникальное имя экземпляра | "frida" |
 | **Модель** |
@@ -615,20 +541,16 @@ docker-compose up -d
 
 **Общий .env:**
 ```bash
-# Общие параметры для всех экземпляров
 INTERNAL_API_SECRET=your-32-char-secret-key-minimum
 
-# Таймауты
 ENCODER_BASE_TIMEOUT=15
 ENCODER_BATCH_TIMEOUT=60
 MAX_SERVICE_TIMEOUT=120
 
-# Лимиты
 MAX_BATCH_SIZE=256
 MAX_TEXT_LENGTH=10000
 MAX_TOTAL_BATCH_LENGTH=500000
 
-# Rate limiting
 RATE_LIMIT_INFO=500/minute
 RATE_LIMIT_ENCODE=500/minute
 RATE_LIMIT_ENCODE_BATCH=150/minute
@@ -650,7 +572,7 @@ ENCODER_SERVICE_PORT=8260
 ```bash
 ENCODER_NAME=deepvk
 HUGGING_FACE_MODEL_NAME=deepvk/USER2-base
-DEVICE=mps  # или cuda, или cpu
+DEVICE=mps
 QUERY_PREFIX="search_query: "
 DOCUMENT_PREFIX="search_document: "
 ENCODER_SERVICE_PORT=8261
@@ -670,21 +592,68 @@ curl http://localhost:8260/health
 - `status` — "healthy" или "degraded"
 - `max_timeout` — максимальный таймаут сервиса
 
-#### Логирование
-
-Сервис использует структурированное логирование с разными уровнями:
-- **DEBUG**: детальная информация о запросах, очередях
-- **INFO**: запуск/остановка, успешные операции
-- **WARNING**: проблемы с очередью, повторные попытки
-- **ERROR**: ошибки модели, таймауты
-
-Логи пишутся в `logs/encoder_service.log` и в stdout.
-
 ### Безопасность
 
-- **JWT аутентификация** — все рабочие эндпоинты защищены
-- **Короткое время жизни токена** — 30 секунд защищает от replay-атак
+- **Гибкая аутентификация** — выбор между JWT и секретным заголовком
+- **Короткое время жизни токена** (в режиме JWT) — 30 секунд защищает от replay-атак
 - **Очередь с ограничением** — защита от перегрузки (maxsize=1000)
 - **Валидация входных данных** — Pydantic модели с проверкой границ
 - **Изоляция контейнеров** — запуск под непривилегированным пользователем
 - **Health checks** — для автоматического восстановления
+
+### Клиентская библиотека (Encoder Client)
+
+Для удобства работы с несколькими экземплярами Encoder Service предоставляется клиентская библиотека `EncoderClient`. Она не входит в состав самого сервиса, но является рекомендуемым способом взаимодействия с ним.
+
+#### Основные возможности
+
+- Поддержка нескольких энкодеров одновременно
+- Параллельные запросы к разным энкодерам
+- Ленивое получение метаданных (/info) при первом использовании
+- Автоматическая подпись запросов (JWT или секретный заголовок)
+- Ретраи и таймауты
+
+#### Пример использования
+
+```python
+from shared.encoder_client import encoder_client
+
+# Кодирование текста всеми доступными энкодерами
+embeddings = await encoder_client.encode_text(
+    text="Пример текста",
+    request_type="query",
+    timeout=30.0  # клиентский таймаут
+)
+
+# Результат: {"deepvk": [0.123, ...], "frida": [0.456, ...]}
+
+# Пакетное кодирование
+batch_embeddings = await encoder_client.encode_batch(
+    texts=["текст1", "текст2"],
+    request_type="document",
+    timeout=60.0
+)
+
+# Подсчет токенов
+token_counts = await encoder_client.count_tokens(
+    text="Пример текста",
+    use_encoders=["deepvk"]  # только указанные энкодеры
+)
+
+# Закрытие клиента
+await encoder_client.close()
+```
+
+#### Конфигурация клиента
+
+Клиент использует те же переменные окружения, что и другие сервисы проекта:
+
+```python
+# Из конфига проекта
+ENCODERS = {
+    "deepvk": "http://encoder-deepvk:8261",
+    "frida": "http://encoder-frida:8260"
+}
+ENCODER_CLIENT_HTTP_TIMEOUT = 30  # для одиночных запросов
+ENCODER_CLIENT_HTTP_BATCH_TIMEOUT = 120  # для batch-запросов
+```

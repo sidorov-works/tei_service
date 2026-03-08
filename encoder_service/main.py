@@ -23,8 +23,12 @@ from typing import Optional, Any
 import uuid
 import time
 
+# Импортируем из shared.auth_service нужную зависимость для аутентификации.
+# В текущем варианте применяем аутентификацию с JWT-токеном
+from shared.auth_service import require_jwt_auth as require_auth
+# from shared.auth_service import require_header_secret as require_auth
+
 from shared.config import config
-from shared.auth_service import require_auth
 from shared.encoder_models import (
     # модели запросов
     EncodeRequest,
