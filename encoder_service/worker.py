@@ -202,43 +202,35 @@ class ModelWorker:
         """
         try:
             model_id = config.HUGGING_FACE_MODEL_NAME
-            model_path: Path = config.MODEL_PATH / model_id
+            model_path: Path = config.MODEL_PATH / model_id  # models/sentence-transformers/ai-forever/FRIDA
             
             logger.info(f"Worker: загружаю модель {model_id}")
             
-            # Загружаем SentenceTransformer модель (в отдельном потоке, чтобы не блокировать)
-            self.encoder = await asyncio.to_thread(
-                SentenceTransformer,
-                str(model_path) if model_path.exists() else model_id,
-                device=config.DEVICE
-            )
+            if model_path.exists():
+                # Модель уже скачана скриптом - грузим напрямую из папки
+                logger.info(f"Worker: модель найдена локально в {model_path}")
+                self.encoder = await asyncio.to_thread(
+                    SentenceTransformer,
+                    str(model_path),  # ← грузим по прямому пути
+                    device=config.DEVICE
+                )
+            else:
+                # Первый запуск - скачиваем и сохраняем в правильную структуру
+                logger.info(f"Worker: модель не найдена, скачиваю...")
+                self.encoder = await asyncio.to_thread(
+                    SentenceTransformer,
+                    model_id,
+                    device=config.DEVICE
+                )
+                # Сохраняем в нужную папку для будущих запусков
+                self.encoder.save(str(model_path))
+                logger.info(f"Worker: модель сохранена в {model_path}")
             
             # Токенизатор уже внутри модели!
             self.tokenizer = self.encoder.tokenizer
             
             logger.info(f"Worker: модель загружена, начинаю обработку задач")
             
-            # Основной цикл обработки задач
-            while self.running:
-                try:
-                    # Ждем новую задачу (с таймаутом, чтобы можно было проверить running)
-                    task = await asyncio.wait_for(
-                        self.input_queue.get(), 
-                        timeout=1.0
-                    )
-                    
-                    # Обрабатываем задачу
-                    await self._process_task(task)
-                    
-                    # Отмечаем задачу как выполненную в очереди
-                    self.input_queue.task_done()
-                    
-                except asyncio.TimeoutError:
-                    # Нет задач - просто продолжаем цикл
-                    continue
-                except Exception as e:
-                    logger.error(f"Worker: ошибка в основном цикле: {e}")
-                    
         except Exception as e:
             logger.error(f"Worker: критическая ошибка при загрузке модели: {e}")
             self.running = False
