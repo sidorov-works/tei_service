@@ -1,7 +1,6 @@
-
 # Encoder Service
 
-Сервис векторизации текста, предоставляющий HTTP API для получения эмбеддингов через FastAPI. Использует модели на базе SentenceTransformers для преобразования текста в векторные представления.
+Сервис векторизации текста, предоставляющий TEI-совместимый HTTP API для получения эмбеддингов через FastAPI. Использует модели на базе SentenceTransformers для преобразования текста в векторные представления.
 
 ### Содержание
 - [Архитектура](#архитектура)
@@ -10,10 +9,7 @@
 - [Управление таймаутами](#управление-таймаутами)
 - [Лимиты и валидация](#лимиты-и-валидация)
 - [Очередь и многопоточность](#очередь-и-многопоточность)
-- [Аутентификация и подпись запросов](#аутентификация-и-подпись-запросов)
-  - [Выбор метода аутентификации](#выбор-метода-аутентификации)
-  - [JWT-аутентификация (режим по умолчанию)](#jwt-аутентификация-режим-по-умолчанию)
-  - [Аутентификация по секретному заголовку](#аутентификация-по-секретному-заголовку)
+- [Аутентификация](#аутентификация)
 - [Установка и запуск](#установка-и-запуск)
   - [Локальный запуск](#локальный-запуск)
   - [Запуск с honcho (Procfile)](#запуск-с-honcho-procfile)
@@ -22,6 +18,7 @@
 - [Конфигурация](#конфигурация)
   - [Переменные окружения](#переменные-окружения)
   - [Примеры .env файлов](#примеры-env-файлов)
+- [Офлайн-режим](#офлайн-режим)
 - [Мониторинг](#мониторинг)
 - [Безопасность](#безопасность)
 - [Клиентская библиотека (Encoder Client)](#клиентская-библиотека-encoder-client)
@@ -38,30 +35,26 @@
 
 - **Батчевая обработка** — поддержка пакетного кодирования нескольких текстов за один запрос для оптимальной производительности.
 
-- **Гибкие таймауты** — клиент может указать желаемое время ожидания (`timeout` в теле запроса), сервис уважает этот таймаут (в пределах своего жесткого потолка).
+- **TEI-совместимый API** — эндпоинты соответствуют спецификации Text Embeddings Inference, что позволяет использовать сервис как замену TEI.
 
-- **JWT аутентификация** — все рабочие эндпоинты защищены. Поддерживается два режима: JWT-токены с коротким сроком жизни (по умолчанию 30 секунд) или статический секретный заголовок для разработки.
+- **Аутентификация по секретному заголовку** — все рабочие эндпоинты защищены статическим API-ключом, передаваемым в заголовке `Authorization: Bearer <token>`.
 
-- **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально в `models/sentence-transformers/`.
+- **Локальное хранение моделей** — модели скачиваются один раз и сохраняются локально в `models/sentence-transformers/`. При наличии локальной копии сервис работает полностью офлайн.
 
 - **Защита от перегрузок** — очередь запросов с максимальным размером (1000 задач) и валидация размера входящих данных. При заполнении очереди > 900 новые запросы получают 503 Service Unavailable.
 
 ### API Эндпоинты
 
-**Важно:** Все POST эндпоинты требуют аутентификации (JWT или секретный заголовок) через заголовок `Authorization: Bearer <token>`.
+**Важно:** Все POST эндпоинты требуют аутентификации через заголовок `Authorization: Bearer <api-key>`.
 
 | Эндпоинт | Метод | Описание |
 |----------|-------|----------|
-| `/info` | GET | Информация об энкодере и его модели (не требует аутентификации) |
-| `/encode` | POST | Кодирование одного текста |
-| `/encode_batch` | POST | Пакетное кодирование нескольких текстов |
-| `/count_tokens` | POST | Подсчет токенов в одном тексте |
-| `/count_tokens_batch` | POST | Подсчет токенов для нескольких текстов |
-| `/vector_size` | GET | Размерность вектора модели (не требует аутентификации) |
-| `/max_length` | GET | Максимальная длина текста в токенах (не требует аутентификации) |
+| `/info` | GET | Информация о модели (не требует аутентификации) |
+| `/embed` | POST | Получение эмбеддингов (одиночный или пакетный запрос) |
+| `/tokenize` | POST | Подсчет токенов (одиночный или пакетный запрос) |
 | `/health` | GET | Проверка здоровья сервиса (не требует аутентификации) |
 
-#### Информация об энкодере (`/info`)
+#### Информация о модели (`/info`)
 
 ```bash
 curl http://localhost:8260/info
@@ -69,96 +62,84 @@ curl http://localhost:8260/info
 
 ```json
 {
-    "name": "deepvk",
-    "model_info": {
-        "name": "deepvk/USER2-base",
-        "vector_size": 768,
-        "max_seq_length": 8192,
-        "query_prefix": "search_query: ",
-        "document_prefix": "search_document: "
-    },
+    "model_id": "deepvk/USER2-base",
+    "max_input_length": 8192,
+    "dimension": 768,
     "status": "operational"
 }
 ```
 
-#### Кодирование текста (`/encode`) с опциональным таймаутом
+#### Получение эмбеддингов (`/embed`)
 
+**Одиночный текст:**
 ```bash
-curl -X POST http://localhost:8260/encode \
+curl -X POST http://localhost:8260/embed \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -H "Authorization: Bearer your-api-key" \
   -d '{
-    "text": "Проблема с доступом к почте",
-    "request_type": "query",
-    "timeout": 30
+    "inputs": "Проблема с доступом к почте",
+    "prompt_name": "query",
+    "normalize": true
   }'
 ```
 
 ```json
 {
-    "embedding": [0.123, -0.456, ...],
-    "dimension": 768,
-    "service_available": true
+    "embedding": [0.123, -0.456, ...]
 }
 ```
 
-#### Пакетное кодирование (`/encode_batch`)
-
+**Пакетный запрос:**
 ```bash
-curl -X POST http://localhost:8260/encode_batch \
+curl -X POST http://localhost:8260/embed \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -H "Authorization: Bearer your-api-key" \
   -d '{
-    "texts": ["текст1", "текст2"],
-    "request_type": "document",
-    "timeout": 60
+    "inputs": ["текст1", "текст2"],
+    "prompt_name": "document",
+    "normalize": true
   }'
 ```
 
 ```json
 {
-    "embeddings": [[0.123, -0.456, ...], [0.789, -0.321, ...]],
-    "count": 2,
-    "service_available": true
+    "embeddings": [[0.123, -0.456, ...], [0.789, -0.321, ...]]
 }
 ```
 
-#### Подсчет токенов (`/count_tokens`)
+#### Подсчет токенов (`/tokenize`)
 
+**Одиночный текст:**
 ```bash
-curl -X POST http://localhost:8260/count_tokens \
+curl -X POST http://localhost:8260/tokenize \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -H "Authorization: Bearer your-api-key" \
   -d '{
-    "text": "Пример текста для подсчета токенов",
-    "timeout": 15
+    "inputs": "Пример текста для подсчета токенов",
+    "add_special_tokens": true
   }'
 ```
 
 ```json
 {
-    "tokens_count": 8,
-    "service_available": true
+    "tokens_count": 8
 }
 ```
 
-#### Пакетный подсчет токенов (`/count_tokens_batch`)
-
+**Пакетный запрос:**
 ```bash
-curl -X POST http://localhost:8260/count_tokens_batch \
+curl -X POST http://localhost:8260/tokenize \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  -H "Authorization: Bearer your-api-key" \
   -d '{
-    "texts": ["текст1", "текст2"],
-    "timeout": 30
+    "inputs": ["текст1", "текст2"],
+    "add_special_tokens": true
   }'
 ```
 
 ```json
 {
-    "tokens_counts": [5, 8],
-    "count": 2,
-    "service_available": true
+    "tokens_counts": [5, 8]
 }
 ```
 
@@ -181,59 +162,39 @@ curl http://localhost:8260/health
 
 ### Модели данных
 
-#### EncodeRequest
+#### EmbedRequest
 
 ```python
 {
-    "text": "string",           # обязательное, не пустое, ≤ MAX_TEXT_LENGTH
-    "request_type": "query",     # опционально, "query" или "document"
-    "timeout": 30.0              # опционально, секунд
+    "inputs": "string" | ["string1", "string2"],  # текст или список текстов
+    "prompt_name": "query",                        # опционально, "query" или "document"
+    "normalize": true,                             # опционально, нормализация вектора
+    "truncate": true                               # опционально, обрезать до max_length
 }
 ```
 
-#### BatchEncodeRequest
+#### TokenizeRequest
 
 ```python
 {
-    "texts": ["string1", "string2"],  # обязательное, 1-256 текстов
-    "request_type": "query",           # опционально
-    "timeout": 60.0                    # опционально
-}
-```
-
-#### BatchTokenCountRequest
-
-```python
-{
-    "texts": ["string1", "string2"],  # обязательное, 1-256 текстов
-    "timeout": 30.0                    # опционально
+    "inputs": "string" | ["string1", "string2"],  # текст или список текстов
+    "add_special_tokens": true,                    # опционально, добавлять спец. токены
+    "truncate": true                                # опционально, обрезать до max_length
 }
 ```
 
 Валидация:
-- Количество текстов ≤ `MAX_BATCH_SIZE` (256)
+- Количество текстов в батче ≤ `MAX_BATCH_SIZE` (256)
 - Каждый текст не пустой и ≤ `MAX_TEXT_LENGTH` (10000 символов)
-- Суммарная длина ≤ `MAX_TOTAL_BATCH_LENGTH` (500000 символов)
+- Суммарная длина всех текстов в батче ≤ `MAX_TOTAL_BATCH_LENGTH` (500000 символов)
 
 ### Управление таймаутами
 
-Сервис реализует гибкую систему таймаутов:
+Сервис не поддерживает передачу таймаутов в теле запроса (в соответствии со спецификацией TEI). Таймауты настраиваются только на стороне сервера:
 
-1. **Клиентский таймаут** — клиент может передать в запросе поле `timeout`, указав, сколько секунд он готов ждать ответа.
-
-2. **Таймауты сервиса по умолчанию** — если клиент не указал таймаут, используются значения из конфига:
-   - `ENCODER_BASE_TIMEOUT` (15с) для `/encode`, `/count_tokens`
-   - `ENCODER_BATCH_TIMEOUT` (60с) для `/encode_batch`, `/count_tokens_batch`
-
-3. **Жесткий потолок** — `MAX_SERVICE_TIMEOUT` (120с) — сервис никогда не ждет дольше этого значения, даже если клиент запросил больше.
-
-**Логика определения времени ожидания:**
-```python
-if client_timeout:
-    effective_timeout = min(client_timeout, MAX_SERVICE_TIMEOUT)
-else:
-    effective_timeout = min(default_timeout, MAX_SERVICE_TIMEOUT)
-```
+- `ENCODER_BASE_TIMEOUT` (15с) — для одиночных запросов (`/embed` с одним текстом, `/tokenize` с одним текстом)
+- `ENCODER_BATCH_TIMEOUT` (60с) — для пакетных запросов (`/embed` с несколькими текстами, `/tokenize` с несколькими текстами)
+- `MAX_SERVICE_TIMEOUT` (120с) — жесткий потолок, сервис никогда не ждет дольше
 
 ### Очередь и многопоточность
 
@@ -245,102 +206,27 @@ else:
 - **Диспетчер результатов** направляет ответы от воркера к ожидающим Future
 - Для избежания блокировки event loop, операции с Future (`set_result`, `set_exception`) выполняются в отдельных потоках через `ThreadPoolExecutor`
 
-### Аутентификация и подпись запросов
+### Аутентификация
 
-#### Выбор метода аутентификации
-
-Encoder Service поддерживает два метода аутентификации, которые переключаются простым изменением импорта в `main.py`:
+Сервис использует аутентификацию по секретному заголовку (API-ключ). Клиент передает ключ в заголовке `Authorization: Bearer <api-key>`.
 
 ```python
-# Вариант 1: JWT-токены (рекомендуется для production)
-from shared.auth_service import require_jwt_auth as require_auth
-
-# Вариант 2: Статический секретный заголовок (для разработки и тестирования)
-# from shared.auth_service import require_header_secret as require_auth
+# В main.py используется require_header_secret
+from shared.auth_service import require_header_secret as require_auth
 ```
 
-**JWT-аутентификация**:
-- Более безопасна благодаря короткоживущим токенам (30 секунд)
-- Защищает от replay-атак
-- Требует синхронизации времени между сервисами
-
-**Аутентификация по секретному заголовку**:
-- Проще в реализации и отладке
-- Подходит для разработки и тестирования
-- Менее безопасна (статический ключ)
-- Использует тот же `INTERNAL_API_SECRET`, но передает его напрямую в заголовке
-
-#### JWT-аутентификация (режим по умолчанию)
-
-Токен должен быть подписан с использованием HS256 и содержать следующие поля:
-
-```json
-{
-    "iss": "client-service-name",     // кто выпустил токен
-    "iat": 1700000000,                 // время выпуска (Unix timestamp)
-    "exp": 1700000030,                  // время истечения (iat + 30 сек)
-    "service": "client-service-name"    // имя сервиса-клиента
-}
-```
-
-**Важно:**
-- `exp` должно быть не более чем через 30 секунд после `iat` (значение по умолчанию)
-- Часы клиента и сервера должны быть синхронизированы (допустимое расхождение - несколько секунд)
-
-##### Генерация токена (примеры на разных языках)
-
-**Python**
-```python
-import time
-import jwt
-
-SECRET_KEY = "your-32-char-secret-key-minimum"  # должен совпадать с INTERNAL_API_SECRET
-
-def create_token(service_name: str = "my-service") -> str:
-    current_time = int(time.time())
-    payload = {
-        "iss": service_name,
-        "iat": current_time,
-        "exp": current_time + 30,
-        "service": service_name
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-```
-
-**JavaScript/Node.js**
-```javascript
-const jwt = require('jsonwebtoken');
-const SECRET_KEY = 'your-32-char-secret-key-minimum';
-
-function createToken(serviceName = 'my-service') {
-    const currentTime = Math.floor(Date.now() / 1000);
-    const payload = {
-        iss: serviceName,
-        iat: currentTime,
-        exp: currentTime + 30,
-        service: serviceName
-    };
-    return jwt.sign(payload, SECRET_KEY, { algorithm: 'HS256' });
-}
-```
-
-##### Возможные ошибки JWT
-
-| Код | Ответ | Причина |
-|-----|-------|---------|
-| 403 | `{"detail": "Missing authentication token"}` | Отсутствует заголовок Authorization |
-| 403 | `{"detail": "Invalid token: Signature verification failed"}` | Неправильный секретный ключ |
-| 403 | `{"detail": "Invalid token: Signature has expired"}` | Токен просрочен |
-
-#### Аутентификация по секретному заголовку
-
-При использовании этого режима клиент просто передает статический секретный ключ в заголовке:
+Ключ задается через переменную окружения `INTERNAL_API_SECRET`:
 
 ```bash
-curl -X POST http://localhost:8260/encode \
+INTERNAL_API_SECRET=your-32-char-secret-key-minimum
+```
+
+Пример запроса с аутентификацией:
+```bash
+curl -X POST http://localhost:8260/embed \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-32-char-secret-key-minimum" \
-  -d '{"text": "пример текста"}'
+  -d '{"inputs": "пример текста"}'
 ```
 
 ### Установка и запуск
@@ -511,7 +397,7 @@ docker-compose up -d
 | Параметр | Описание | Значение по умолчанию |
 |----------|----------|----------------------|
 | **Обязательные** |
-| `INTERNAL_API_SECRET` | Секретный ключ для аутентификации | **Нет значения** |
+| `INTERNAL_API_SECRET` | API-ключ для аутентификации | **Нет значения** |
 | **Идентификация** |
 | `ENCODER_NAME` | Уникальное имя экземпляра | "frida" |
 | **Модель** |
@@ -529,10 +415,10 @@ docker-compose up -d
 | `MAX_TOTAL_BATCH_LENGTH` | Макс. суммарная длина | 500000 |
 | **Rate limiting** |
 | `RATE_LIMIT_INFO` | Лимит для /info, /health | "500/minute" |
-| `RATE_LIMIT_ENCODE` | Лимит для /encode | "500/minute" |
-| `RATE_LIMIT_ENCODE_BATCH` | Лимит для /encode_batch | "150/minute" |
-| `RATE_LIMIT_COUNT_TOKENS` | Лимит для /count_tokens | "600/minute" |
-| `RATE_LIMIT_COUNT_TOKENS_BATCH` | Лимит для /count_tokens_batch | "200/minute" |
+| `RATE_LIMIT_ENCODE` | Лимит для /embed (одиночные) | "500/minute" |
+| `RATE_LIMIT_ENCODE_BATCH` | Лимит для /embed (batch) | "150/minute" |
+| `RATE_LIMIT_COUNT_TOKENS` | Лимит для /tokenize (одиночные) | "600/minute" |
+| `RATE_LIMIT_COUNT_TOKENS_BATCH` | Лимит для /tokenize (batch) | "200/minute" |
 | **Пути** |
 | `LOG_PATH` | Директория для логов | "logs" |
 | `MODEL_PATH` | Директория для моделей | "models/sentence-transformers" |
@@ -578,6 +464,38 @@ DOCUMENT_PREFIX="search_document: "
 ENCODER_SERVICE_PORT=8261
 ```
 
+### Офлайн-режим
+
+Сервис поддерживает работу в полностью офлайн-режиме при наличии локально скачанных моделей.
+
+Модели хранятся в директории `MODEL_PATH` со следующей структурой:
+```
+models/sentence-transformers/
+├── ai-forever/
+│   └── FRIDA/
+│       ├── config.json
+│       ├── modules.json
+│       ├── model.safetensors
+│       └── tokenizer_config.json
+└── deepvk/
+    └── USER2-base/
+        ├── config.json
+        ├── modules.json
+        ├── model.safetensors
+        └── tokenizer_config.json
+```
+
+При запуске сервис:
+1. Проверяет наличие модели по пути `{MODEL_PATH}/{HUGGING_FACE_MODEL_NAME}`
+2. Если модель найдена локально — загружает её оттуда
+3. Если модель не найдена — скачивает с Hugging Face Hub
+
+Для принудительного офлайн-режима можно установить переменные окружения (в `main.py`):
+```python
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+```
+
 ### Мониторинг
 
 #### Health check
@@ -594,8 +512,7 @@ curl http://localhost:8260/health
 
 ### Безопасность
 
-- **Гибкая аутентификация** — выбор между JWT и секретным заголовком
-- **Короткое время жизни токена** (в режиме JWT) — 30 секунд защищает от replay-атак
+- **Аутентификация по API-ключу** — все рабочие эндпоинты защищены статическим ключом
 - **Очередь с ограничением** — защита от перегрузки (maxsize=1000)
 - **Валидация входных данных** — Pydantic модели с проверкой границ
 - **Изоляция контейнеров** — запуск под непривилегированным пользователем
@@ -603,15 +520,15 @@ curl http://localhost:8260/health
 
 ### Клиентская библиотека (Encoder Client)
 
-Для удобства работы с несколькими экземплярами Encoder Service предоставляется клиентская библиотека `EncoderClient`. Она не входит в состав самого сервиса, но является рекомендуемым способом взаимодействия с ним.
+Для удобства работы с несколькими экземплярами Encoder Service предоставляется клиентская библиотека `EncoderClient`. Она полностью совместима с TEI-эндпоинтами.
 
 #### Основные возможности
 
 - Поддержка нескольких энкодеров одновременно
 - Параллельные запросы к разным энкодерам
 - Ленивое получение метаданных (/info) при первом использовании
-- Автоматическая подпись запросов (JWT или секретный заголовок)
-- Ретраи и таймауты
+- Автоматическая подпись запросов (API-ключ в заголовке)
+- Ретраи и таймауты на уровне HTTP-клиента
 
 #### Пример использования
 
@@ -621,8 +538,7 @@ from shared.encoder_client import encoder_client
 # Кодирование текста всеми доступными энкодерами
 embeddings = await encoder_client.encode_text(
     text="Пример текста",
-    request_type="query",
-    timeout=30.0  # клиентский таймаут
+    request_type="query"
 )
 
 # Результат: {"deepvk": [0.123, ...], "frida": [0.456, ...]}
@@ -630,8 +546,7 @@ embeddings = await encoder_client.encode_text(
 # Пакетное кодирование
 batch_embeddings = await encoder_client.encode_batch(
     texts=["текст1", "текст2"],
-    request_type="document",
-    timeout=60.0
+    request_type="document"
 )
 
 # Подсчет токенов
@@ -646,14 +561,17 @@ await encoder_client.close()
 
 #### Конфигурация клиента
 
-Клиент использует те же переменные окружения, что и другие сервисы проекта:
+Клиент использует переменные окружения из конфига проекта:
 
 ```python
 # Из конфига проекта
 ENCODERS = {
     "deepvk": "http://encoder-deepvk:8261",
-    "frida": "http://encoder-frida:8260"
+    "frida": "http://encoder-frida:8260",
+    "frida_tei": "http://tei-frida:8080"  # можно добавлять TEI-инстансы
 }
-ENCODER_CLIENT_HTTP_TIMEOUT = 30  # для одиночных запросов
-ENCODER_CLIENT_HTTP_BATCH_TIMEOUT = 120  # для batch-запросов
+
+# Таймауты HTTP-клиента (не передаются в теле запроса)
+ENCODER_CLIENT_HTTP_TIMEOUT = 30        # для одиночных запросов
+ENCODER_CLIENT_HTTP_BATCH_TIMEOUT = 120 # для batch-запросов
 ```
