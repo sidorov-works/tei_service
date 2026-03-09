@@ -37,6 +37,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from shared.config import config
 from sentence_transformers import SentenceTransformer
+from huggingface_hub import snapshot_download, HfApi
 import asyncio
 from typing import Any, Optional, List
 import time
@@ -201,35 +202,64 @@ class ModelWorker:
         Он работает в бесконечном цикле, ожидая новые задачи из очереди.
         """
         try:
-            model_id = config.HUGGING_FACE_MODEL_NAME
-            model_path: Path = config.MODEL_PATH / model_id  # models/sentence-transformers/ai-forever/FRIDA
+            model_id = config.HUGGING_FACE_MODEL_NAME  # "deepvk/USER2-base" или "ai-forever/FRIDA"
             
-            logger.info(f"Worker: загружаю модель {model_id}")
+            # Правильное имя папки: заменяем / на --
+            safe_model_name = model_id.replace('/', '--')
+            model_path = config.MODEL_PATH / safe_model_name  # models/sentence-transformers/deepvk--USER2-base
             
-            if model_path.exists():
-                # Модель уже скачана скриптом - грузим напрямую из папки
-                logger.info(f"Worker: модель найдена локально в {model_path}")
-                self.encoder = await asyncio.to_thread(
-                    SentenceTransformer,
-                    str(model_path),  # ← грузим по прямому пути
-                    device=config.DEVICE
+            # Проверяем, есть ли уже модель
+            if not model_path.exists():
+                logger.info(f"Модель не найдена, скачиваю {model_id} в {model_path}")
+                
+                # Создаём родительскую папку, если нужно
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Скачиваем ВСЕ файлы модели в нашу папку
+                snapshot_download(
+                    repo_id=model_id,
+                    local_dir=str(model_path),      # Прямая загрузка без симлинков
+                    local_dir_use_symlinks=False,   # Копируем файлы, а не создаём ссылки
+                    ignore_patterns=[],             # Качаем всё (можно добавить исключения)
+                    max_workers=4,                  # Параллельная загрузка
+                    resume_download=True            # Докачка при обрыве
                 )
+                logger.info(f"✅ Модель успешно скачана в {model_path}")
             else:
-                # Первый запуск - скачиваем и сохраняем в правильную структуру
-                logger.info(f"Worker: модель не найдена, скачиваю...")
-                self.encoder = await asyncio.to_thread(
-                    SentenceTransformer,
-                    model_id,
-                    device=config.DEVICE
-                )
-                # Сохраняем в нужную папку для будущих запусков
-                self.encoder.save(str(model_path))
-                logger.info(f"Worker: модель сохранена в {model_path}")
+                logger.info(f"✅ Модель уже существует в {model_path}")
+            
+            # Загружаем SentenceTransformer из локальной папки
+            self.encoder = await asyncio.to_thread(
+                SentenceTransformer,
+                str(model_path),
+                device=config.DEVICE
+            )
             
             # Токенизатор уже внутри модели!
             self.tokenizer = self.encoder.tokenizer
             
             logger.info(f"Worker: модель загружена, начинаю обработку задач")
+
+            # Основной цикл обработки задач
+            while self.running:
+                try:
+                    # Ждем новую задачу (с таймаутом, чтобы можно было проверить running)
+                    task = await asyncio.wait_for(
+                        self.input_queue.get(), 
+                        timeout=1.0
+                    )
+                    
+                    # Обрабатываем задачу
+                    await self._process_task(task)
+                    
+                    # Отмечаем задачу как выполненную в очереди
+                    self.input_queue.task_done()
+                    
+                except asyncio.TimeoutError:
+                    # Нет задач - просто продолжаем цикл
+                    continue
+                except Exception as e:
+                    logger.error(f"Worker: ошибка в основном цикле: {e}")
             
         except Exception as e:
             logger.error(f"Worker: критическая ошибка при загрузке модели: {e}")
