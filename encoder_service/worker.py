@@ -37,19 +37,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from shared.config import config
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer
-from pathlib import Path
 import asyncio
 from typing import Any, Optional, List
 import time
 from dataclasses import dataclass
 from enum import Enum
 import math
+from pathlib import Path
 
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 
 logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE.WORKER")
-
 
 # ======================================================================
 # Вспомогательные функции для очистки данных
@@ -215,11 +213,8 @@ class ModelWorker:
                 device=config.DEVICE
             )
             
-            # Загружаем токенизатор
-            self.tokenizer = await asyncio.to_thread(
-                AutoTokenizer.from_pretrained,
-                model_id
-            )
+            # Токенизатор уже внутри модели!
+            self.tokenizer = self.encoder.tokenizer
             
             logger.info(f"Worker: модель загружена, начинаю обработку задач")
             

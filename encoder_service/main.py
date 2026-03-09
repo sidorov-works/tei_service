@@ -2,15 +2,17 @@
 
 """
 Главный модуль Encoder Service.
-Содержит FastAPI приложение, эндпоинты и логику жизненного цикла.
+Предоставляет TEI-совместимый HTTP API для работы с эмбеддинговыми моделями.
 """
 
+# Первым делом до любых импортов настроим логер
 import setproctitle
 from shared.utils.logger import logger as base_logger, wrap_logger_methods
 
 setproctitle.setproctitle("encoder_service")
 logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE")
 
+from shared.config import config
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
@@ -19,35 +21,25 @@ import slowapi
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import asyncio
-from typing import Optional, Any
+from typing import Optional, Any, Union, List
 import uuid
 import time
 
-# Импортируем из shared.auth_service нужную зависимость для аутентификации.
-# В текущем варианте применяем аутентификацию с JWT-токеном
-from shared.auth_service import require_jwt_auth as require_auth
-# from shared.auth_service import require_header_secret as require_auth
+# Аутентификация через секретный заголовок 
+from shared.auth_service import require_header_secret as require_auth
 
-from shared.config import config
-from shared.encoder_models import (
-    # модели запросов
-    EncodeRequest,
-    BatchEncodeRequest,
-    BatchTokenCountRequest,
-    # модели ответов
-    EncodeResponse,
-    BatchEncodeResponse,
-    TokenCountResponse,
-    BatchTokenCountResponse,
-    EncoderInfo,        # ответ эндпойнта /info
-    EncoderModelInfo,   # используется внутри модели EncoderInfo
+from shared.tei_models import (
+    EmbedRequest,
+    TokenizeRequest,
+    EmbedResponse,
+    TokenizeResponse,
+    InfoResponse
 )
 
 from encoder_service.worker import (
     ModelWorker, 
     Task, 
     TaskType, 
-    BATCH_TASKS,
     clean_text
 )
 from encoder_service.dispatcher import ResultDispatcher
@@ -58,7 +50,6 @@ from encoder_service.dispatcher import ResultDispatcher
 # ======================================================================
 
 # Жесткий потолок таймаута - сервис НИКОГДА не будет ждать дольше
-# На случай, если клиент укажет в запросе какой-то нереально огромный тайм-аут
 MAX_SERVICE_TIMEOUT = config.MAX_SERVICE_TIMEOUT
 
 
@@ -66,18 +57,14 @@ MAX_SERVICE_TIMEOUT = config.MAX_SERVICE_TIMEOUT
 # Глобальные объекты
 # ======================================================================
 
-# Очереди для общения между FastAPI и воркером
 input_queue = asyncio.Queue(maxsize=1000)
 output_queue = asyncio.Queue(maxsize=1000)
 
-# Воркер с моделью
 worker = ModelWorker(input_queue, output_queue)
-
-# Диспетчер результатов
 dispatcher = ResultDispatcher()
 
-# Информация об энкодере
-encoder_info: Optional[EncoderInfo] = None
+# Информация о модели
+model_info: Optional[InfoResponse] = None
 
 
 # ======================================================================
@@ -88,17 +75,8 @@ encoder_info: Optional[EncoderInfo] = None
 async def lifespan(app: FastAPI):
     """
     Управление жизненным циклом FastAPI приложения.
-    
-    При запуске:
-    1. Запускаем воркера (он загрузит модель)
-    2. Запускаем диспетчер результатов
-    3. Запускаем чистильщик зависших задач
-    4. Ждем загрузки модели и формируем encoder_info
-    
-    При завершении:
-    1. Корректно останавливаем все задачи
     """
-    global encoder_info
+    global model_info
     
     # Запускаем воркера
     worker_task = asyncio.create_task(worker.start())
@@ -111,39 +89,27 @@ async def lifespan(app: FastAPI):
         dispatcher.cleanup_stale(MAX_SERVICE_TIMEOUT)
     )
     
-    # Ждем загрузки модели без таймаута - сколько надо, столько и ждем
+    # Ждем загрузки модели
     while worker.encoder is None and worker.running:
         await asyncio.sleep(0.1)
     
-    # Теперь модель точно загружена
+    # Формируем информацию о модели в формате TEI
     if worker.encoder:
-        encoder_info = EncoderInfo(
-            name=config.ENCODER_NAME,
-            model_info=EncoderModelInfo(
-                name=config.HUGGING_FACE_MODEL_NAME,
-                vector_size=worker.encoder.get_sentence_embedding_dimension(),
-                max_seq_length=worker.encoder.max_seq_length,
-                query_prefix=config.QUERY_PREFIX,
-                document_prefix=config.DOCUMENT_PREFIX
-            ),
+        model_info = InfoResponse(
+            model_id=config.HUGGING_FACE_MODEL_NAME,
+            max_input_length=worker.encoder.max_seq_length,
+            dimension=worker.encoder.get_sentence_embedding_dimension(),
             status="operational"
         )
         logger.info(f"Encoder Service запущен, модель {config.HUGGING_FACE_MODEL_NAME} загружена")
     else:
-        encoder_info = EncoderInfo(
-            name=config.ENCODER_NAME,
-            model_info=EncoderModelInfo(
-                name=config.HUGGING_FACE_MODEL_NAME,
-                vector_size=None,
-                max_seq_length=None,
-                query_prefix=config.QUERY_PREFIX,
-                document_prefix=config.DOCUMENT_PREFIX
-            ),
+        model_info = InfoResponse(
+            model_id=config.HUGGING_FACE_MODEL_NAME,
+            max_input_length=None,
+            dimension=None,
             status="degraded"
         )
         logger.error("Модель не загрузилась!")
-    
-    logger.info(f"Максимальный таймаут сервиса: {MAX_SERVICE_TIMEOUT}с")
     
     yield
     
@@ -153,9 +119,7 @@ async def lifespan(app: FastAPI):
     dispatcher_task.cancel()
     cleaner_task.cancel()
     
-    # Закрываем dispatcher (останавливаем executor)
     await dispatcher.close()
-    
     await asyncio.gather(worker_task, dispatcher_task, cleaner_task, return_exceptions=True)
     logger.info("Encoder Service остановлен")
 
@@ -167,7 +131,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     lifespan=lifespan, 
     title="Encoder Service",
-    description="Сервис для кодирования текста в векторные представления"
+    description="TEI-совместимый сервис для кодирования текста в векторные представления"
 )
 
 # Rate limiter
@@ -180,8 +144,6 @@ app.add_exception_handler(RateLimitExceeded, slowapi._rate_limit_exceeded_handle
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
     Глобальный обработчик ошибок валидации запросов.
-    
-    Возвращает единый формат ошибки для всех случаев валидации.
     """
     errors = []
     for error in exc.errors():
@@ -203,115 +165,75 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ======================================================================
-# Функция отправки задачи (ядро логики таймаутов)
+# Функция отправки задачи
 # ======================================================================
 
 async def submit_task(
     task_type: TaskType, 
     data: Any, 
-    request_type: Optional[str] = None,
-    client_timeout: Optional[float] = None
+    request_type: Optional[str] = None
 ) -> Any:
     """
-    Отправка задачи воркеру и ожидание результата с учетом таймаутов.
+    Отправка задачи воркеру и ожидание результата.
     
-    Логика таймаутов:
-    1. Если клиент передал timeout - используем его, но не больше MAX_SERVICE_TIMEOUT
-    2. Если клиент не передал - используем таймаут по умолчанию из конфига
-    3. В любом случае, никогда не ждем дольше MAX_SERVICE_TIMEOUT
+    TEI не поддерживает передачу таймаутов в теле запроса,
+    поэтому используем только таймауты сервиса по умолчанию.
     
     Args:
         task_type: Тип задачи
         data: Данные для обработки
-        request_type: query или document
-        client_timeout: Сколько клиент готов ждать (опционально)
+        request_type: query или document (для encode операций)
         
     Returns:
         Any: Результат обработки
         
     Raises:
-        HTTPException: 503 при переполнении очереди, 504 при таймауте, 500 при ошибках
+        HTTPException: 503 при переполнении очереди, 504 при таймауте
     """
     # Проверяем, что очередь не переполнена
     if input_queue.qsize() >= 900:
         logger.warning(f"Очередь почти полна: {input_queue.qsize()}")
         raise HTTPException(503, "Service busy, queue is full")
     
-    # Генерируем уникальный ID задачи
     task_id = str(uuid.uuid4())
-    
-    # Создаем Future для ожидания результата
     loop = asyncio.get_event_loop()
     future = loop.create_future()
     
-    # Определяем эффективный таймаут
-    # 1. Базовый таймаут из конфига (зависит от типа задачи)
+    # Определяем таймаут в зависимости от типа задачи
     default_timeout = (
         config.ENCODER_BATCH_TIMEOUT 
-        if task_type in BATCH_TASKS 
+        if task_type in [TaskType.ENCODE_BATCH, TaskType.COUNT_TOKENS_BATCH]
         else config.ENCODER_BASE_TIMEOUT
     )
+    effective_timeout = min(default_timeout, MAX_SERVICE_TIMEOUT)
     
-    # 2. Если клиент передал свой таймаут - берем его, но не больше MAX_SERVICE_TIMEOUT
-    if client_timeout is not None:
-        effective_timeout = min(client_timeout, MAX_SERVICE_TIMEOUT)
-        logger.debug(f"Клиент указал timeout={client_timeout}, используем {effective_timeout}")
-    else:
-        # 3. Иначе используем базовый, но тоже не больше MAX_SERVICE_TIMEOUT
-        effective_timeout = min(default_timeout, MAX_SERVICE_TIMEOUT)
-        logger.debug(f"Клиент не указал timeout, используем {effective_timeout}")
+    # Регистрируем Future без клиентского таймаута
+    dispatcher.register(task_id, future, None)
     
-    # Регистрируем Future в диспетчере
-    dispatcher.register(task_id, future, client_timeout)
-    
-    # Создаем задачу для воркера
     task = Task(
         task_id=task_id,
         task_type=task_type,
         data=data,
         created_at=time.time(),
         request_type=request_type,
-        client_timeout=client_timeout
+        client_timeout=None  # TEI не поддерживает клиентские таймауты
     )
     
     try:
-        # Отправляем задачу в очередь воркера
         await input_queue.put(task)
-        logger.debug(f"Задача {task_id} отправлена в очередь")
         
-        # Ждем результат с эффективным таймаутом
         try:
             result = await asyncio.wait_for(future, timeout=effective_timeout)
             return result
             
         except asyncio.TimeoutError:
-            # Таймаут - клиент устал ждать
             logger.warning(f"Таймаут задачи {task_id} после {effective_timeout}с")
             dispatcher.unregister(task_id)
-            
-            # Отменяем Future, чтобы освободить ресурсы
             if not future.done():
                 future.cancel()
+            raise HTTPException(504, f"Request timeout after {effective_timeout} seconds")
             
-            # Возвращаем 504 с информацией о таймауте
-            raise HTTPException(
-                504, 
-                f"Request timeout after {effective_timeout} seconds"
-            )
-            
-        except asyncio.CancelledError:
-            # Клиент отменил запрос (разорвал соединение)
-            logger.debug(f"Запрос {task_id} отменен клиентом")
-            dispatcher.unregister(task_id)
-            if not future.done():
-                future.cancel()
-            raise
-            
-    except HTTPException:
-        # Пробрасываем HTTP исключения дальше
-        raise
     except Exception as e:
-        # Любые другие ошибки
         dispatcher.unregister(task_id)
         if not future.done():
             future.cancel()
@@ -320,129 +242,178 @@ async def submit_task(
 
 
 # ======================================================================
-# ЭНДПОЙНТЫ
+# TEI-СОВМЕСТИМЫЕ ЭНДПОЙНТЫ
 # ======================================================================
 
-@app.get("/info", response_model=EncoderInfo)
+@app.get("/info", response_model=InfoResponse)
 @limiter.limit(config.RATE_LIMIT_INFO)
 async def get_encoder_info(request: Request):
     """
-    Возвращает полную информацию об этом экземпляре энкодера.
+    TEI-совместимый endpoint информации о модели.
     
-    Этот эндпоинт не требует аутентификации, так как используется
-    клиентами при инициализации для получения данных о модели.
+    Returns:
+        {
+            "model_id": "deepvk/USER2-base",
+            "max_input_length": 8192,
+            "dimension": 768,
+            "status": "operational"
+        }
     """
     if not worker.encoder:
-        return EncoderInfo(
-            name=config.ENCODER_NAME,
-            model_info=EncoderModelInfo(
-                name=config.HUGGING_FACE_MODEL_NAME,
-                vector_size=None,
-                max_seq_length=None,
-                query_prefix=config.QUERY_PREFIX,
-                document_prefix=config.DOCUMENT_PREFIX
-            ),
+        return InfoResponse(
+            model_id=config.HUGGING_FACE_MODEL_NAME,
+            max_input_length=None,
+            dimension=None,
             status="degraded"
         )
     
-    # Обновляем информацию из модели
-    encoder_info.model_info.vector_size = worker.encoder.get_sentence_embedding_dimension()
-    encoder_info.model_info.max_seq_length = worker.encoder.max_seq_length
-    
-    return encoder_info
+    # Обновляем актуальные значения из модели
+    return InfoResponse(
+        model_id=config.HUGGING_FACE_MODEL_NAME,
+        max_input_length=worker.encoder.max_seq_length,
+        dimension=worker.encoder.get_sentence_embedding_dimension(),
+        status="operational"
+    )
 
 
-@app.post("/encode", response_model=EncodeResponse)
+@app.post("/embed")
 @limiter.limit(config.RATE_LIMIT_ENCODE)
-async def encode_text(
+async def embed(
     request: Request,
-    encode_request: EncodeRequest, 
+    embed_request: EmbedRequest,
     _: None = Depends(require_auth)
 ):
     """
-    Кодирование одного текста в вектор.
+    TEI-совместимый endpoint для получения эмбеддингов.
     
-    Новое опциональное поле: timeout - сколько клиент готов ждать (секунды)
+    Поддерживает как одиночные тексты, так и батчи.
+    
+    Пример запроса (single):
+    {
+        "inputs": "What is Deep Learning?",
+        "prompt_name": "query",
+        "normalize": true,
+        "truncate": true
+    }
+    
+    Пример запроса (batch):
+    {
+        "inputs": ["text1", "text2"],
+        "prompt_name": "document",
+        "normalize": true
+    }
+    
+    Returns (single):
+    {
+        "embedding": [0.123, -0.456, ...]
+    }
+    
+    Returns (batch):
+    {
+        "embeddings": [[0.123, ...], [0.789, ...]]
+    }
     """
     try:
-        cleaned_text = clean_text(encode_request.text)
+        # Определяем тип запроса из prompt_name
+        # TEI использует prompt_name для выбора шаблона
+        request_type = embed_request.prompt_name or "query"
         
-        embedding = await submit_task(
-            task_type=TaskType.ENCODE,
-            data=cleaned_text,
-            request_type=encode_request.request_type,
-            client_timeout=encode_request.timeout
-        )
+        # Обработка одиночного текста
+        if isinstance(embed_request.inputs, str):
+            cleaned_text = clean_text(embed_request.inputs)
+            
+            embedding = await submit_task(
+                task_type=TaskType.ENCODE,
+                data=cleaned_text,
+                request_type=request_type
+            )
+            
+            return {"embedding": embedding}
         
-        return EncodeResponse(
-            embedding=embedding,
-            service_available=True
-        )
-        
+        # Обработка батча
+        else:
+            cleaned_texts = [clean_text(text) for text in embed_request.inputs]
+            
+            embeddings = await submit_task(
+                task_type=TaskType.ENCODE_BATCH,
+                data=cleaned_texts,
+                request_type=request_type
+            )
+            
+            return {"embeddings": embeddings}
+            
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"encode endpoint error: {e}")
+        logger.error(f"embed endpoint error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Internal error: {str(e)}"
         )
 
 
-@app.post("/encode_batch", response_model=BatchEncodeResponse)
-@limiter.limit(config.RATE_LIMIT_ENCODE_BATCH)
-async def encode_batch(
+@app.post("/tokenize")
+@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
+async def tokenize(
     request: Request,
-    batch_encode_request: BatchEncodeRequest, 
+    tokenize_request: TokenizeRequest,
     _: None = Depends(require_auth)
 ):
     """
-    Пакетное кодирование нескольких текстов.
+    TEI-совместимый endpoint для подсчета токенов.
     
-    Новое опциональное поле: timeout - сколько клиент готов ждать (секунды)
+    Пример запроса (single):
+    {
+        "inputs": "What is Deep Learning?",
+        "add_special_tokens": true,
+        "truncate": true
+    }
+    
+    Пример запроса (batch):
+    {
+        "inputs": ["text1", "text2"],
+        "add_special_tokens": true
+    }
+    
+    Returns (single):
+    {
+        "tokens_count": 8
+    }
+    
+    Returns (batch):
+    {
+        "tokens_counts": [5, 8]
+    }
     """
     try:
-        cleaned_texts = [clean_text(text) for text in batch_encode_request.texts]
+        # Обработка одиночного текста
+        if isinstance(tokenize_request.inputs, str):
+            tokens_count = await submit_task(
+                task_type=TaskType.COUNT_TOKENS,
+                data=tokenize_request.inputs,
+                request_type=None
+            )
+            
+            return {"tokens_count": tokens_count}
         
-        embeddings = await submit_task(
-            task_type=TaskType.ENCODE_BATCH,
-            data=cleaned_texts,
-            request_type=batch_encode_request.request_type,
-            client_timeout=batch_encode_request.timeout
-        )
-        
-        return BatchEncodeResponse(
-            embeddings=embeddings,
-            service_available=True
-        )
-        
+        # Обработка батча
+        else:
+            tokens_counts = await submit_task(
+                task_type=TaskType.COUNT_TOKENS_BATCH,
+                data=tokenize_request.inputs,
+                request_type=None
+            )
+            
+            return {"tokens_counts": tokens_counts}
+            
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"encode_batch endpoint error: {e}")
+        logger.error(f"tokenize endpoint error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Internal error: {str(e)}"
         )
-
-
-@app.get("/vector_size")
-@limiter.limit(config.RATE_LIMIT_INFO)
-async def get_vector_size(request: Request):
-    """Возвращает размерность вектора используемой модели."""
-    if worker.encoder:
-        size = worker.encoder.get_sentence_embedding_dimension()
-        return {"vector_size": size}
-    return {"vector_size": None}
-
-
-@app.get("/max_length")
-@limiter.limit(config.RATE_LIMIT_INFO)
-async def get_max_length(request: Request):
-    """Возвращает максимальную длину текста в токенах."""
-    if worker.encoder:
-        return {"max_length": worker.encoder.max_seq_length}
-    return {"max_length": None}
 
 
 @app.get("/health")
@@ -450,78 +421,14 @@ async def get_max_length(request: Request):
 async def health_check(request: Request):
     """
     Проверка здоровья сервиса.
-    
-    Возвращает статус сервиса, информацию о модели,
-    размер очереди и количество активных запросов.
     """
     active_count = await dispatcher.get_active_count()
     
     return {
         "status": "healthy" if worker.encoder else "degraded",
         "encoder_loaded": worker.encoder is not None,
-        "queue_size": input_queue.qsize(),  
-        "active_requests": active_count,     
+        "queue_size": input_queue.qsize(),
+        "active_requests": active_count,
         "service_available": worker.encoder is not None,
         "max_timeout": MAX_SERVICE_TIMEOUT
     }
-
-
-@app.post("/count_tokens", response_model=TokenCountResponse)
-@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
-async def count_tokens(
-    request: Request,
-    encode_request: EncodeRequest, 
-    _: None = Depends(require_auth)
-):
-    """Подсчет количества токенов в тексте."""
-    try:
-        tokens_count = await submit_task(
-            task_type=TaskType.COUNT_TOKENS,
-            data=encode_request.text,
-            client_timeout=encode_request.timeout
-        )
-        
-        # return {"tokens_count": tokens_count}
-        return TokenCountResponse(
-            tokens_count=tokens_count,
-            service_available=True
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"count_tokens endpoint error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {str(e)}"
-        )
-
-@app.post("/count_tokens_batch", response_model=BatchTokenCountResponse)
-@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS_BATCH)
-async def count_tokens_batch(
-    request: Request,
-    batch_token_count_request: BatchTokenCountRequest, 
-    _: None = Depends(require_auth)
-):
-    """Пакетный подсчет токенов для нескольких текстов."""
-    try:
-        tokens_counts = await submit_task(
-            task_type=TaskType.COUNT_TOKENS_BATCH,
-            data=batch_token_count_request.texts,
-            client_timeout=batch_token_count_request.timeout
-        )
-        
-        return BatchTokenCountResponse(
-            tokens_counts=tokens_counts,
-            service_available=True
-        )
-        
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        logger.error(f"count_tokens_batch endpoint error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {str(e)}"
-        )

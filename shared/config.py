@@ -13,6 +13,7 @@ class DefaultConfig:
     ENCODER_NAME = os.getenv("ENCODER_NAME", "frida")
 
     LOG_PATH = Path("logs")
+
     MODEL_PATH = Path("models") / "sentence-transformers"
 
     # Безопасность и аутентификация -----------------------------------------------------------
