@@ -163,7 +163,7 @@ docker-compose up --build
 ### Проверка GPU в контейнере
 
 ```bash
-docker exec -it encoder_service_1 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+docker exec encoder_service_1 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
 
 ## Мониторинг
