@@ -1,7 +1,5 @@
 #docker-compose.yml
-
 services:
-  # Первый экземпляр
   encoder1:
     build:
       context: .
@@ -9,18 +7,19 @@ services:
     ports:
       - "8260:8260"
     volumes:
-      # Общая папка для моделей
       - ./models:/app/models
-      # Отдельная папка для логов первого сервиса
       - ./logs/encoder1:/app/logs
     env_file:
-      - .env          # параметры, общие для всех сервисов
-      - .env.encoder1 # специфические параметры конкретного сервиса
+      - .env
+      - .env.encoder1
     environment:
       - PORT=8260
-      - DOCKER_ENV=false  # используем файловый логгер
+      - DOCKER_ENV=false
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
     container_name: encoder_service_1
     restart: unless-stopped
+    runtime: nvidia
     command: >
       uvicorn encoder_service.main:app
       --port 8260 --host 0.0.0.0 --workers 1
@@ -29,15 +28,7 @@ services:
     shm_size: '2gb'
     mem_limit: 8g
     cpus: '4.0'
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
-  # Второй экземпляр
   encoder2:
     build:
       context: .
@@ -45,18 +36,19 @@ services:
     ports:
       - "8261:8261"
     volumes:
-      # Та же общая папка для моделей
       - ./models:/app/models
-      # Отдельная папка для логов второго сервиса
       - ./logs/encoder2:/app/logs
     env_file:
-      - .env          # параметры, общие для всех сервисов
-      - .env.encoder2 # специфические параметры конкретного сервиса
+      - .env
+      - .env.encoder2
     environment:
       - PORT=8261
       - DOCKER_ENV=false
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=1
     container_name: encoder_service_2
     restart: unless-stopped
+    runtime: nvidia
     command: >
       uvicorn encoder_service.main:app
       --port 8261 --host 0.0.0.0 --workers 1
@@ -65,10 +57,3 @@ services:
     shm_size: '2gb'
     mem_limit: 8g
     cpus: '4.0'
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]

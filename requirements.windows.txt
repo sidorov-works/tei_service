@@ -48,3 +48,4 @@ typing_extensions==4.15.0
 urllib3==2.6.2
 uvicorn==0.40.0
 uvloop==0.22.1
+logger-utils @ git+https://github.com/sidorov-works/logger_utils@0e664913bc3f5dd17a0ec776fdf7e10d800d0f1a

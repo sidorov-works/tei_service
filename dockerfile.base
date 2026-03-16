@@ -2,8 +2,10 @@
 
 FROM python:3.11-slim
 
+# Добавлен git для установки logger-utils
 RUN apt-get update && apt-get install -y \
     curl \
+    git \
     libopenblas-dev \
     gcc \
     g++ \
