@@ -1,69 +1,69 @@
-# shared/config.py
-
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 
-# load_dotenv берет из текущей папки файл .env 
-# и загружает в операционную систему находящиеся в этом файле переменные окружения
-load_dotenv(override=True) 
+load_dotenv(override=True)
 
 class DefaultConfig:
 
     ENCODER_NAME = os.getenv("ENCODER_NAME", "frida")
 
-    LOG_PATH = Path("logs")
-
     MODEL_PATH = Path("models") / "sentence-transformers"
+
+    # Логирование -----------------------------------------------------------------------------
+    LOG_PATH = Path(os.getenv("LOG_PATH", "logs"))
+    LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO")
+    LOG_FORMAT = os.getenv("LOG_FORMAT", '%(asctime)s | %(name)s | %(levelname)-8s | %(message)s')
 
     # Безопасность и аутентификация -----------------------------------------------------------
     INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
-    # ALLOWED_JWT_ALGORITHMS = x.split(',') if (x := os.getenv("ALLOWED_JWT_ALGORITHMS")) else None
     ALLOWED_JWT_ALGORITHMS = ["HS256"]
 
-    # Тайм-ауты сервиса по умолчанию ----------------------------------------------------------
-    ENCODER_BASE_TIMEOUT = int(os.getenv("ENCODER_BASE_TIMEOUT", "15"))
-    ENCODER_BATCH_TIMEOUT = int(os.getenv("ENCODER_BATCH_TIMEOUT", "60"))
-    # жесткий потолок таймаута - сервис НИКОГДА не будет ждать дольше
-    MAX_SERVICE_TIMEOUT = int(os.getenv("MAX_SERVICE_TIMEOUT", "120"))
+    # Тайм-ауты -------------------------------------------------------------------------------
+    # Максимальное время выполнения операции /embed (от входа в эндпоинт до возврата результата)
+    EMBED_TIMEOUT = float(os.getenv("EMBED_TIMEOUT", "30.0"))
+    # Максимальное время выполнения операции /tokenize (токенизация выполняется быстрее)
+    TOKENIZE_TIMEOUT = float(os.getenv("TOKENIZE_TIMEOUT", "5.0"))
 
-    # Настройки для работы с кокретной эмбеддинговой моделью ----------------------------------
+    # Ограничения длин очередей ---------------------------------------------------------------
+    INPUT_QUEUE_MAXSIZE = int(os.getenv("INPUT_QUEUE_MAXSIZE", "1000"))
+    OUTPUT_QUEUE_MAXSIZE = int(os.getenv("OUTPUT_QUEUE_MAXSIZE", "1000"))
+    HEALTH_QUEUE_THRESHOLD = 0.9  # Порог переполненности для /health
 
-    DEVICE = os.getenv("DEVICE", "cpu")  # или "cpu"/"cuda"
+    # Настройки для работы с конкретной эмбеддинговой моделью ----------------------------------
+    DEVICE = os.getenv("DEVICE", "cpu")  # или "cuda"
 
     # Описание и свойства эмбеддинговой модели
     HUGGING_FACE_MODEL_NAME = os.getenv("HUGGING_FACE_MODEL_NAME", "ai-forever/FRIDA")
-    QUERY_PREFIX=os.getenv("QUERY_PREFIX", "search_query: ")
-    DOCUMENT_PREFIX=os.getenv("DOCUMENT_PREFIX", "search_document: ")
+    QUERY_PREFIX = os.getenv("QUERY_PREFIX", "search_query: ")
+    DOCUMENT_PREFIX = os.getenv("DOCUMENT_PREFIX", "search_document: ")
+
+    # Режим применения эндпойнта /tokenize ---------------------------------------------------- 
+    # Оригинальный TEI возвращает полную информацию о токенах. 
+    # Это не всегда и не всем требуется. Например, для основного применения - подсчета 
+    # длины текста в токенах - достаточно только определить длину списков с информацией о токенах, 
+    # а сама информация не нужна. Поэтому предусматриваем режим "lite", 
+    # в котором информация по токенам будет содержать типовые плейсхолдеры
+    TOKENIZE_MODE = os.getenv("TOKENIZE_MODE", "full")
 
     # Лимиты на входящие запросы --------------------------------------------------------------
-    # При превышении лимитов сервис должен вызвать ValidationError
+    # Максимально допустимое кол-во текстов в батче ДЛЯ ЭНКОДЕРА.
+    MAX_MODEL_BATCH_SIZE = int(os.getenv("MAX_MODEL_BATCH_SIZE", "32"))
 
-    # Максимально допустимое кол-во текстов в батче.
-    # Предполагается, что модель Sentence Transformers сама поделит большой батч на порции,
-    # однако, для подстраховки от переполнения памяти введем предварительное ограничение
-    MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "256"))
+    # Максимально допустимое кол-во текстов в батче ДЛЯ ЭНДПОЙНТА СЕРВИСА.
+    MAX_SERVICE_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "128"))
 
-    # Максимально допустимая длина одного текста в запросе. 
-    # Этот параметр не связан напрямую со свойством max_seq_len конкретной эмбеддинговой модели 
-    # (которая, как ожидается сама обрежет лишнее). Это просто подстраховка, 
-    # чтобы не "забить" сервис заведомо выссмысленно огромными запросами
+    # Максимально допустимая длина одного текста в запросе.
     MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "10000"))
 
     # Максимально допустимая суммарная длина текстов в батче
     MAX_TOTAL_BATCH_LENGTH = int(os.getenv("MAX_TOTAL_BATCH_LENGTH", "500000"))
 
     # Rate limiting и защита от Ddos ---------------------------------------------------------
-    RATE_LIMIT_INFO = os.getenv("RATE_LIMIT_INFO", "500/minute")                
-    RATE_LIMIT_ENCODE = os.getenv("RATE_LIMIT_ENCODE", "200/minute")            
-    RATE_LIMIT_ENCODE_BATCH = os.getenv("RATE_LIMIT_ENCODE_BATCH", "60/minute") 
+    RATE_LIMIT_INFO = os.getenv("RATE_LIMIT_INFO", "500/minute")
+    RATE_LIMIT_HEALTH = os.getenv("RATE_LIMIT_HEALTH", "500/minute")                
+    RATE_LIMIT_EMBED = os.getenv("RATE_LIMIT_EMBED", "200/minute")            
     RATE_LIMIT_COUNT_TOKENS = os.getenv("RATE_LIMIT_COUNT_TOKENS", "200/minute")      
     RATE_LIMIT_COUNT_TOKENS_BATCH = os.getenv("RATE_LIMIT_COUNT_TOKENS_BATCH", "60/minute")
 
-    # Настройки логирования и отладки ---------------------------------------------------------
-    EXC_INFO = False # выводить ли в лог весь stacktrace
-
-# Глобальный инстанс конфига для импорта. 
-# При необходимости поменять в проекте сразу несколько настроек 
-# можно будет сделать config инстансом другого класса
 config = DefaultConfig()

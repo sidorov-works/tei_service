@@ -550,7 +550,7 @@ batch_embeddings = await encoder_client.encode_batch(
 )
 
 # Подсчет токенов
-token_counts = await encoder_client.count_tokens(
+token_counts = await encoder_client.tokenize(
     text="Пример текста",
     use_encoders=["deepvk"]  # только указанные энкодеры
 )

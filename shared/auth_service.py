@@ -11,8 +11,10 @@ from jose import jwt, JWTError
 from fastapi import HTTPException, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Dict, Any, List
-from shared.utils.logger import logger
 from shared.config import config
+
+import logging 
+logger = logging.getLogger(__name__)
 
 # Схема аутентификации - ожидаем токен в заголовке Authorization: Bearer <token>
 security = HTTPBearer(auto_error=False)

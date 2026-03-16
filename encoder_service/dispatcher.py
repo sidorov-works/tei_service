@@ -1,68 +1,57 @@
-# encoder_service/dispatcher.py
-
 """
 Модуль диспетчера результатов для Encoder Service.
-Содержит класс ResultDispatcher, который связывает задачи из очереди
-с ожидающими их Future.
+Связывает задачи из очереди с ожидающими их Future и очищает зависшие задачи.
 """
 
 import asyncio
 import time
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Tuple, Optional
 import concurrent.futures
 
-from shared.config import config
-from shared.utils.logger import logger as base_logger, wrap_logger_methods
-from encoder_service.worker import TaskResult
-
-logger = wrap_logger_methods(base_logger, "ENCODER_SERVICE.DISPATCHER")
+import logging
+logger = logging.getLogger(__name__)
 
 
 class ResultDispatcher:
     """
     Диспетчер результатов.
     
+    Получает результаты от воркера и направляет их в соответствующие Future.
+    Периодически очищает задачи, которые висят дольше своего таймаута.
+    
     Особенности реализации:
-    1. Future.set_exception() всегда вызывается в отдельном потоке через asyncio.to_thread,
-       чтобы не блокировать event loop при выполнении колбэков Future.
+    1. Future.set_result/set_exception выполняются в отдельных потоках через
+       ThreadPoolExecutor, чтобы не блокировать event loop колбэками.
     2. Все операции со словарем active_futures защищены блокировкой.
-    3. cleanup_stale убивает задачи, которые клиент уже не ждет.
-    
-    Почему to_thread безопасен:
-    - Запускает синхронную функцию в отдельном потоке из пула
-    - Не блокирует главный event loop
-    - Пул потоков ограничен (по умолчанию min(32, os.cpu_count() + 4))
-    - set_exception выполняется быстро, даже с колбэками
     """
-    
-    # Максимальное время жизни задачи без client_timeout
-    DEFAULT_MAX_AGE = config.ENCODER_BASE_TIMEOUT + 5
     
     def __init__(self):
         """Инициализация диспетчера."""
-        self.active_futures: Dict[str, Tuple[asyncio.Future, float, Optional[float]]] = {}
+        # active_futures: task_id -> (future, created_at, operation_timeout)
+        self.active_futures: Dict[str, Tuple[asyncio.Future, float, float]] = {}
         self._lock = asyncio.Lock()
         
-        # Создаем свой ThreadPoolExecutor для изоляции
+        # ThreadPoolExecutor для выполнения set_result/set_exception в потоках
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=4,
             thread_name_prefix="future_executor"
         )
         
-    def register(self, task_id: str, future: asyncio.Future, client_timeout: Optional[float] = None):
+    def register(self, task_id: str, future: asyncio.Future, operation_timeout: float):
         """
-        Регистрирует новый ожидающий запрос.
+        Регистрирует новую ожидающую задачу.
         
         Args:
             task_id: Уникальный ID задачи
             future: Future для результата
-            client_timeout: Сколько клиент готов ждать (для cleaner'a)
+            operation_timeout: Максимальное время выполнения операции
+                               (EMBED_TIMEOUT или TOKENIZE_TIMEOUT)
         """
-        self.active_futures[task_id] = (future, time.time(), client_timeout)
+        self.active_futures[task_id] = (future, time.time(), operation_timeout)
         
     def unregister(self, task_id: str):
         """
-        Удаляет завершенный запрос.
+        Удаляет завершенную задачу.
         
         Args:
             task_id: ID задачи для удаления
@@ -79,17 +68,13 @@ class ResultDispatcher:
             try:
                 result = await result_queue.get()
                 
-                # Ищем Future
                 future_info = self.active_futures.get(result.task_id)
                 if future_info:
                     future, _, _ = future_info
                     
                     if not future.done():
                         if result.success:
-                            # set_result безопасно вызывать в event loop
-                            # потому что он не вызывает колбэки синхронно?
-                            # НЕТ! set_result ТОЖЕ вызывает колбэки!
-                            # Поэтому тоже отправляем в поток
+                            # set_result может вызывать колбэки, выполняем в потоке
                             await asyncio.to_thread(
                                 self._safe_set_result,
                                 future,
@@ -102,7 +87,6 @@ class ResultDispatcher:
                                 Exception(result.error)
                             )
                     
-                    # Удаляем из активных
                     self.unregister(result.task_id)
                 
                 result_queue.task_done()
@@ -128,61 +112,47 @@ class ResultDispatcher:
         except Exception:
             pass
     
-    async def cleanup_stale(self, max_service_timeout: int):
+    async def cleanup_stale(self):
         """
-        Периодическая очистка задач, которые клиент уже не ждет.
+        Периодическая очистка задач, которые превысили свой таймаут.
         
         Проверяет каждые 10 секунд и убивает задачи, которые висят
-        в очереди дольше, чем клиент готов ждать.
-        
-        Args:
-            max_service_timeout: Жесткий потолок таймаута сервиса
+        в очереди дольше, чем отведено на операцию (EMBED_TIMEOUT или TOKENIZE_TIMEOUT).
+        Такие задачи уже не нужны - эндпоинт вернул 504 и Future отменён.
         """
         while True:
             await asyncio.sleep(10)
             now = time.time()
             to_kill = []  # (task_id, future)
             
-            # 1. Собираем задачи для убийства под блокировкой
+            # Собираем задачи для убийства под блокировкой
             async with self._lock:
-                # Используем list() для безопасной итерации по копии
-                for task_id, (future, created_at, client_timeout) in list(self.active_futures.items()):
+                for task_id, (future, created_at, operation_timeout) in list(self.active_futures.items()):
                     age = now - created_at
                     
-                    # Определяем максимальное время жизни задачи
-                    if client_timeout:
-                        # Клиент явно указал, сколько готов ждать
-                        max_age = min(client_timeout, max_service_timeout)
-                    else:
-                        # Клиент не указал - используем базовый таймаут с запасом
-                        max_age = self.DEFAULT_MAX_AGE
-                    
-                    # Если задача висит дольше допустимого и еще не выполнена
-                    if age > max_age and not future.done():
+                    # Если задача висит дольше своего таймаута и Future ещё не выполнена
+                    if age > operation_timeout and not future.done():
                         to_kill.append((task_id, future))
             
-            # 2. Убиваем задачи ВНЕ блокировки, в отдельных потоках
+            # Убиваем задачи вне блокировки, в отдельных потоках
             for task_id, future in to_kill:
                 try:
-                    # Запускаем set_exception в потоке, чтобы:
-                    # - не блокировать event loop колбэками Future
-                    # - не держать блокировку на время выполнения колбэков
                     await asyncio.to_thread(
                         self._safe_set_exception,
                         future,
                         asyncio.TimeoutError(
-                            f"Task cancelled: client timeout expired after waiting in queue"
+                            f"Task cancelled: operation timeout ({operation_timeout}s) exceeded"
                         )
                     )
                 except Exception as e:
                     logger.debug(f"Failed to kill task {task_id}: {e}")
                 
-                # 3. Удаляем из словаря (под блокировкой, но быстро)
+                # Удаляем из словаря (под блокировкой, но быстро)
                 async with self._lock:
                     self.active_futures.pop(task_id, None)
             
             if to_kill:
-                logger.warning(f"Killed {len(to_kill)} stale tasks (clients timed out)")
+                logger.warning(f"Killed {len(to_kill)} stale tasks (exceeded operation timeout)")
     
     async def get_active_count(self) -> int:
         """Безопасно возвращает количество активных задач."""
@@ -193,6 +163,3 @@ class ResultDispatcher:
         """Корректное завершение работы."""
         self._executor.shutdown(wait=False)
         logger.debug("Dispatcher closed")
-
-
-# Важно! Нужно не забыть закрыть executor при остановке сервиса
