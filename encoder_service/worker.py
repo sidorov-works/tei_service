@@ -89,12 +89,15 @@ class Task:
         data: Данные для обработки (текст или список текстов)
         created_at: Временная метка создания задачи
         request_type: Тип запроса для encode операций ("query" или "document")
+        normalize: Нормализовать ли векторы 
+            (только для TaskType.ENCODE и TaskType.ENCODE_BATCH)
     """
     task_id: str
     task_type: TaskType
     data: Any
     created_at: float
     request_type: Optional[str] = None
+    normalize: Optional[bool] = False # только для /embed
 
 
 @dataclass
@@ -270,6 +273,11 @@ class ModelWorker:
                 result.append(tokens_info)
         
         return result
+    
+    def _normalize_embedding(self, embedding: NDArray[np.float64]) -> NDArray[np.float64]:
+        norm = np.linalg.norm(embedding)
+        if norm:
+            return embedding / norm
 
     async def _process_task(self, task: Task):
         """
@@ -293,6 +301,9 @@ class ModelWorker:
                     text = config.DOCUMENT_PREFIX + text
                 
                 embedding: NDArray[np.float64] = self.encoder.encode(text)
+                # Если требуется нормализация
+                if task.normalize:
+                    embedding = self._normalize_embedding(embedding)
                 # TEI требует список списков даже для одного текста
                 result_data = [clean_embedding(embedding.tolist())]
                 
@@ -324,6 +335,9 @@ class ModelWorker:
                     # Собираем результаты
                     for j in range(embeddings_batch.shape[0]):
                         emb_row: NDArray[np.float64] = embeddings_batch[j]
+                        # Нормализация (если затребована)
+                        if task.normalize:
+                            emb_row = self._normalize_embedding(emb_row)
                         all_embeddings.append(clean_embedding(emb_row.tolist()))
                 
                 result_data = all_embeddings
