@@ -161,7 +161,9 @@ async def submit_task(
     task_type: TaskType, 
     data: Any, 
     request_type: Optional[str] = None,
-    task_timeout: float = None  # обязательный параметр, должен передаваться из эндпоинта
+    task_timeout: float = None,  # обязательный параметр, должен передаваться из эндпоинта
+    normalize: bool = True,
+    truncate: bool = True,
 ) -> Any:
     """
     Отправка задачи воркеру и ожидание результата.
@@ -195,7 +197,9 @@ async def submit_task(
         task_type=task_type,
         data=data,
         created_at=time.time(),
-        request_type=request_type
+        request_type=request_type,
+        truncate=truncate,
+        normalize=normalize
     )
     
     try:
@@ -266,7 +270,9 @@ async def embed(
                 task_type=TaskType.ENCODE,
                 data=cleaned_text,
                 request_type=request_type,
-                task_timeout=config.EMBED_TIMEOUT
+                task_timeout=config.EMBED_TIMEOUT,
+                normalize=embed_request.normalize,
+                truncate=embed_request.truncate,
             )
             
             return embeddings

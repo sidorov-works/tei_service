@@ -89,15 +89,16 @@ class Task:
         data: Данные для обработки (текст или список текстов)
         created_at: Временная метка создания задачи
         request_type: Тип запроса для encode операций ("query" или "document")
+        truncate: Обрезать ли тексты длиннее max_input_length
         normalize: Нормализовать ли векторы 
-            (только для TaskType.ENCODE и TaskType.ENCODE_BATCH)
     """
     task_id: str
     task_type: TaskType
     data: Any
     created_at: float
     request_type: Optional[str] = None
-    normalize: Optional[bool] = False # только для /embed
+    truncate: bool = True # только для /embed
+    normalize: bool = False # только для /embed
 
 
 @dataclass
@@ -278,6 +279,50 @@ class ModelWorker:
         norm = np.linalg.norm(embedding)
         if norm:
             return embedding / norm
+        
+    def _truncate_texts(self, texts: List[str]) -> List[str]:
+        """
+        Обрезает тексты до max_seq_length модели, если нужно.
+        Возвращает обрезанные тексты.
+        """
+        if not self.tokenizer or not self.encoder.max_seq_length:
+            return texts
+        
+        max_length = self.encoder.max_seq_length
+        result = []
+        
+        for text in texts:
+            # Токенизируем без обрезки, чтобы узнать реальную длину
+            tokens = self.tokenizer.encode(text, add_special_tokens=True)
+            
+            if len(tokens) <= max_length:
+                result.append(text)
+                continue
+            
+            # Обрезаем токены (убираем лишние, но сохраняем специальные)
+            truncated_tokens = tokens[:max_length]
+            
+            # Декодируем обратно в текст
+            truncated_text = self.tokenizer.decode(
+                truncated_tokens, 
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=True
+            )
+            result.append(truncated_text)
+            
+            logger.debug(f"Текст обрезан с {len(tokens)} до {max_length} токенов")
+        
+        return result
+    
+    def _is_too_long(self, text: str) -> bool:
+        """
+        Проверяет, превышает ли текст лимит модели в токенах.
+        Используется для проверки в случае, когда клиент не хочет обрезать тексты.
+        """
+        if not self.tokenizer or not self.encoder.max_seq_length:
+            return False
+        tokens = self.tokenizer.encode(text, add_special_tokens=True)
+        return len(tokens) > self.encoder.max_seq_length
 
     async def _process_task(self, task: Task):
         """
@@ -295,6 +340,18 @@ class ModelWorker:
             if task.task_type == TaskType.ENCODE:
                 # Одиночное кодирование
                 text = task.data
+
+                # Применяем обрезку если нужно
+                if task.truncate:
+                    texts = self._truncate_texts([text])
+                    text = texts[0]
+                # else: проверяем длину и кидаем ошибку если превышает
+                elif self._is_too_long(text):
+                    raise ValueError(
+                        f"Text exceeds max_input_length ({self.encoder.max_seq_length} "
+                        "tokens) and truncate=false"
+                    )
+                
                 if task.request_type == "query":
                     text = config.QUERY_PREFIX + text
                 elif task.request_type == "document":
@@ -310,6 +367,18 @@ class ModelWorker:
             elif task.task_type == TaskType.ENCODE_BATCH:
                 # Пакетное кодирование с разбивкой по MAX_MODEL_BATCH_SIZE
                 texts = task.data
+
+                # Применяем обрезку ко всем текстам
+                if task.truncate:
+                    texts = self._truncate_texts(texts)
+                else:
+                    # Проверяем каждый текст
+                    for text in texts:
+                        if self._is_too_long(text):
+                            raise ValueError(
+                                f"Text exceeds max_input_length ({self.encoder.max_seq_length}" 
+                                "tokens) and truncate=false"
+                            )
                 
                 # Применяем префиксы, если нужно
                 if task.request_type == "query":
