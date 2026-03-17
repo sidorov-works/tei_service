@@ -14,6 +14,7 @@ class DefaultConfig:
     LOG_PATH = Path(os.getenv("LOG_PATH", "logs"))
     LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", '%(asctime)s | %(name)s | %(levelname)-8s | %(message)s')
+    DOCKER_ENV= os.getenv("DOCKER_ENV") == "true" 
 
     # Безопасность и аутентификация -----------------------------------------------------------
     INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")

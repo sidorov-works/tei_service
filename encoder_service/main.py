@@ -5,12 +5,12 @@
 
 # Настройка логгера должна быть первым делом
 from logger_utils import configure_root, get_logger
-from pathlib import Path
 from shared.config import config
 configure_root(
     level=config.LOGGING_LEVEL, 
     log_file=config.LOG_PATH / "app.log",
-    fmt=config.LOG_FORMAT
+    fmt=config.LOG_FORMAT,
+    docker_mode=config.DOCKER_ENV
 )
 
 logger = get_logger("ENCODER_SERVICE")
