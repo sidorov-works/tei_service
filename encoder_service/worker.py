@@ -88,7 +88,7 @@ class Task:
         task_type: Тип задачи
         data: Данные для обработки (текст или список текстов)
         created_at: Временная метка создания задачи
-        request_type: Тип запроса для encode операций ("query" или "document")
+        prompt_name: Имя промпта для добавления префикса запроса
         truncate: Обрезать ли тексты длиннее max_input_length
         normalize: Нормализовать ли векторы 
     """
@@ -96,7 +96,8 @@ class Task:
     task_type: TaskType
     data: Any
     created_at: float
-    request_type: Optional[str] = None
+    # request_type: Optional[str] = None
+    prompt_name: Optional[str] = None
     truncate: bool = True # только для /embed
     normalize: bool = False # только для /embed
 
@@ -352,12 +353,10 @@ class ModelWorker:
                         "tokens) and truncate=false"
                     )
                 
-                if task.request_type == "query":
-                    text = config.QUERY_PREFIX + text
-                elif task.request_type == "document":
-                    text = config.DOCUMENT_PREFIX + text
-                
-                embedding: NDArray[np.float64] = self.encoder.encode(text)
+                embedding: NDArray[np.float64] = self.encoder.encode(
+                    sentences=text,
+                    prompt_name=task.prompt_name
+                )
                 # Если требуется нормализация
                 if task.normalize:
                     embedding = self._normalize_embedding(embedding)
@@ -380,12 +379,6 @@ class ModelWorker:
                                 "tokens) and truncate=false"
                             )
                 
-                # Применяем префиксы, если нужно
-                if task.request_type == "query":
-                    texts = [config.QUERY_PREFIX + text for text in texts]
-                elif task.request_type == "document":
-                    texts = [config.DOCUMENT_PREFIX + text for text in texts]
-                
                 # Разбиваем на порции по MAX_MODEL_BATCH_SIZE (GPU memory)
                 model_batch_size = config.MAX_MODEL_BATCH_SIZE
                 all_embeddings = []
@@ -399,7 +392,10 @@ class ModelWorker:
                     )
                     
                     # Кодируем порцию
-                    embeddings_batch: NDArray[np.float64] = self.encoder.encode(batch)
+                    embeddings_batch: NDArray[np.float64] = self.encoder.encode(
+                        sentences=batch,
+                        prompt_name=task.prompt_name
+                    )
                     
                     # Собираем результаты
                     for j in range(embeddings_batch.shape[0]):

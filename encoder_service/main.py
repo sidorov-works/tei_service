@@ -35,6 +35,7 @@ from shared.tei_models import (
     EmbedRequest,
     TokenizeRequest,
     TokenInfo,
+    PromptInfo,
     InfoResponse
 )
 from encoder_service.worker import (
@@ -238,13 +239,29 @@ async def get_encoder_info(request: Request):
         return InfoResponse(
             model_id=config.HUGGING_FACE_MODEL_NAME,
             max_input_length=None,
-            max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE
+            max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE,
+            prompts=[]
         )
     
+    if (
+        hasattr(worker.encoder, "prompts") 
+        and worker.encoder.prompts 
+        and isinstance(worker.encoder.prompts, dict)
+    ):
+        # Будем сообщать только о тех промптах, у которых не пустой текст
+        prompts = [
+            PromptInfo(name=prompt_name, text=prompt_text)
+            for prompt_name, prompt_text in worker.encoder.prompts.items()
+            if prompt_text
+        ]
+    else:
+        prompts = []
+
     return InfoResponse(
         model_id=config.HUGGING_FACE_MODEL_NAME,
         max_input_length=worker.encoder.max_seq_length,
-        max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE
+        max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE,
+        prompts=prompts
     )
 
 

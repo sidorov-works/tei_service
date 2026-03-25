@@ -34,10 +34,8 @@ class DefaultConfig:
     # Настройки для работы с конкретной эмбеддинговой моделью ----------------------------------
     DEVICE = os.getenv("DEVICE", "cpu")  # или "cuda"
 
-    # Описание и свойства эмбеддинговой модели
+    # Название (идентификатор) модели на hugging face
     HUGGING_FACE_MODEL_NAME = os.getenv("HUGGING_FACE_MODEL_NAME", "ai-forever/FRIDA")
-    QUERY_PREFIX = os.getenv("QUERY_PREFIX", "search_query: ")
-    DOCUMENT_PREFIX = os.getenv("DOCUMENT_PREFIX", "search_document: ")
 
     # Режим применения эндпойнта /tokenize ---------------------------------------------------- 
     # Оригинальный TEI возвращает полную информацию о токенах. 
