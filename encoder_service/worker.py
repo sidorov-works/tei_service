@@ -96,7 +96,6 @@ class Task:
     task_type: TaskType
     data: Any
     created_at: float
-    # request_type: Optional[str] = None
     prompt_name: Optional[str] = None
     truncate: bool = True # только для /embed
     normalize: bool = False # только для /embed

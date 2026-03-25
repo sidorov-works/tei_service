@@ -161,7 +161,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def submit_task(
     task_type: TaskType, 
     data: Any, 
-    request_type: Optional[str] = None,
+    prompt_name: Optional[str] = None,
     task_timeout: float = None,  # обязательный параметр, должен передаваться из эндпоинта
     normalize: bool = True,
     truncate: bool = True,
@@ -172,7 +172,7 @@ async def submit_task(
     Args:
         task_type: Тип задачи
         data: Данные для обработки
-        request_type: query или document (для encode операций)
+        prompt_name: Имя промпта эмбеддинговой модели
         task_timeout: Максимальное время выполнения операции (из конфига)
         
     Returns:
@@ -198,7 +198,7 @@ async def submit_task(
         task_type=task_type,
         data=data,
         created_at=time.time(),
-        request_type=request_type,
+        prompt_name=prompt_name,
         truncate=truncate,
         normalize=normalize
     )
@@ -278,15 +278,13 @@ async def embed(
     Возвращает список списков float, даже для одного текста.
     """
     try:
-        request_type = embed_request.prompt_name or "query"
-        
         if isinstance(embed_request.inputs, str):
             cleaned_text = clean_text(embed_request.inputs)
             
             embeddings: List[List[float]] = await submit_task(
                 task_type=TaskType.ENCODE,
                 data=cleaned_text,
-                request_type=request_type,
+                prompt_name=embed_request.prompt_name,
                 task_timeout=config.EMBED_TIMEOUT,
                 normalize=embed_request.normalize,
                 truncate=embed_request.truncate,
@@ -300,8 +298,10 @@ async def embed(
             embeddings: List[List[float]] = await submit_task(
                 task_type=TaskType.ENCODE_BATCH,
                 data=cleaned_texts,
-                request_type=request_type,
-                task_timeout=config.EMBED_TIMEOUT
+                prompt_name=embed_request.prompt_name,
+                task_timeout=config.EMBED_TIMEOUT,
+                normalize=embed_request.normalize,
+                truncate=embed_request.truncate
             )
             
             return embeddings
