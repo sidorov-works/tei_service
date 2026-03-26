@@ -46,7 +46,7 @@ def clean_text(text: str) -> str:
     return cleaned_text
 
 
-def clean_embedding(embedding: List[float]) -> List[float]:
+def nan_inf_embedding_clean(embedding: List[float]) -> List[float]:
     """
     Очищает вектор от NaN и Inf в соответствии с настройками.
     
@@ -57,17 +57,30 @@ def clean_embedding(embedding: List[float]) -> List[float]:
         return embedding
     
     cleaned = []
-    has_nan = False
+    nan_idx = []
+    inf_idx = []
     
-    for x in embedding:
-        if math.isnan(x) or math.isinf(x):
-            has_nan = True
+    for i, x in enumerate(embedding):
+        if math.isnan(x):
+            nan_idx.append(i)
+            cleaned.append(config.EMBEDDING_NAN_REPLACEMENT)
+        elif math.isinf(x):
+            inf_idx.append(i)
             cleaned.append(config.EMBEDDING_NAN_REPLACEMENT)
         else:
             cleaned.append(x)
     
-    if has_nan and config.EMBEDDING_LOG_NAN:
-        logger.warning(f"NaN/Inf detected in embedding, replaced with {config.EMBEDDING_NAN_REPLACEMENT}")
+    if config.EMBEDDING_LOG_NAN:
+        if nan_idx:
+            logger.warning(
+                f"{len(nan_idx)} NaN values detected in embedding at indexes: {nan_idx} "
+                f"Replaced with {config.EMBEDDING_NAN_REPLACEMENT}"
+            )
+        if inf_idx:
+            logger.warning(
+                f"{len(inf_idx)} Inf values detected in embedding at indexes: {inf_idx} "
+                f"Replaced with {config.EMBEDDING_NAN_REPLACEMENT}"
+            )
     
     return cleaned
 
@@ -377,7 +390,7 @@ class ModelWorker:
                 if task.normalize:
                     embedding = self._normalize_embedding(embedding)
                 # TEI требует список списков даже для одного текста
-                result_data = [clean_embedding(embedding.tolist())]
+                result_data = [nan_inf_embedding_clean(embedding.tolist())]
                 
             elif task.task_type == TaskType.ENCODE_BATCH:
                 # Пакетное кодирование с разбивкой по MAX_MODEL_BATCH_SIZE
@@ -420,7 +433,7 @@ class ModelWorker:
                         # Нормализация (если затребована)
                         if task.normalize:
                             emb_row = self._normalize_embedding(emb_row)
-                        all_embeddings.append(clean_embedding(emb_row.tolist()))
+                        all_embeddings.append(nan_inf_embedding_clean(emb_row.tolist()))
                 
                 result_data = all_embeddings
             
