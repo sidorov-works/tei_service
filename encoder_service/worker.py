@@ -48,21 +48,28 @@ def clean_text(text: str) -> str:
 
 def clean_embedding(embedding: List[float]) -> List[float]:
     """
-    Очищает вектор от NaN и Inf, заменяя их на 0.0.
+    Очищает вектор от NaN и Inf в соответствии с настройками.
     
-    Args:
-        embedding: Исходный вектор
-        
-    Returns:
-        List[float]: Очищенный вектор
+    Если EMBEDDING_CLEAN_NAN = false, возвращает исходный вектор (может содержать NaN).
+    Если true - заменяет NaN/Inf на EMBEDDING_NAN_REPLACEMENT.
     """
-    cleaned_embedding = []
+    if not config.EMBEDDING_CLEAN_NAN:
+        return embedding
+    
+    cleaned = []
+    has_nan = False
+    
     for x in embedding:
         if math.isnan(x) or math.isinf(x):
-            cleaned_embedding.append(0.0)
+            has_nan = True
+            cleaned.append(config.EMBEDDING_NAN_REPLACEMENT)
         else:
-            cleaned_embedding.append(x)
-    return cleaned_embedding
+            cleaned.append(x)
+    
+    if has_nan and config.EMBEDDING_LOG_NAN:
+        logger.warning(f"NaN/Inf detected in embedding, replaced with {config.EMBEDDING_NAN_REPLACEMENT}")
+    
+    return cleaned
 
 
 # ======================================================================
@@ -332,6 +339,15 @@ class ModelWorker:
         """
         start_time = time.time()
         logger.debug(f"Worker: начал обработку задачи {task.task_id} типа {task.task_type}")
+
+        # ОЧИСТКА ТЕКСТА - ЕДИНОЕ МЕСТО 
+        # Очищаем все текстовые данные для всех типов задач
+        if task.task_type in (TaskType.ENCODE, TaskType.ENCODE_BATCH, TaskType.TOKENIZE):
+            if isinstance(task.data, str):
+                task.data = clean_text(task.data)
+            elif isinstance(task.data, list):
+                task.data = [clean_text(t) if isinstance(t, str) else t for t in task.data]
+
         
         try:
             result_data = None

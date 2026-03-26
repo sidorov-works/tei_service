@@ -278,12 +278,10 @@ async def embed(
     Возвращает список списков float, даже для одного текста.
     """
     try:
-        if isinstance(embed_request.inputs, str):
-            cleaned_text = clean_text(embed_request.inputs)
-            
+        if isinstance(embed_request.inputs, str):          
             embeddings: List[List[float]] = await submit_task(
                 task_type=TaskType.ENCODE,
-                data=cleaned_text,
+                data=embed_request.inputs,
                 prompt_name=embed_request.prompt_name,
                 task_timeout=config.EMBED_TIMEOUT,
                 normalize=embed_request.normalize,
@@ -292,12 +290,10 @@ async def embed(
             
             return embeddings
         
-        else:
-            cleaned_texts = [clean_text(text) for text in embed_request.inputs]
-            
+        else:            
             embeddings: List[List[float]] = await submit_task(
                 task_type=TaskType.ENCODE_BATCH,
-                data=cleaned_texts,
+                data=embed_request.inputs,
                 prompt_name=embed_request.prompt_name,
                 task_timeout=config.EMBED_TIMEOUT,
                 normalize=embed_request.normalize,

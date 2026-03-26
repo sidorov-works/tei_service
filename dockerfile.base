@@ -12,10 +12,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY requirements.windows.txt .
+# Копируем requirements для CUDA (без torch)
+COPY requirements.cuda.txt .
 
+# Устанавливаем зависимости (без torch)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.windows.txt
+    pip install --no-cache-dir -r requirements.cuda.txt
 
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \

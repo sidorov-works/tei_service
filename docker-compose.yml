@@ -15,16 +15,16 @@ services:
       - ./logs/encoder1:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.encoder1 # специфические параметры конкретного сервиса
+      - .env.encoder1 # специфические параметры первого сервиса
     environment:
       - PORT=8260
-      - DOCKER_ENV=true  
+      - DOCKER_ENV=true
     container_name: encoder_service_1
     restart: unless-stopped
     command: >
       uvicorn encoder_service.main:app
       --port 8260 --host 0.0.0.0 --workers 1
-      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
+      --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
     mem_limit: 8g
@@ -36,7 +36,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
   # Второй экземпляр
   encoder2:
     build:
@@ -45,13 +44,13 @@ services:
     ports:
       - "8261:8261"
     volumes:
-      # Та же общая папка для моделей
+      # Общая папка для моделей
       - ./models:/app/models
       # Отдельная папка для логов второго сервиса
       - ./logs/encoder2:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.encoder2 # специфические параметры конкретного сервиса
+      - .env.encoder2 # специфические параметры второго сервиса
     environment:
       - PORT=8261
       - DOCKER_ENV=true
@@ -60,7 +59,7 @@ services:
     command: >
       uvicorn encoder_service.main:app
       --port 8261 --host 0.0.0.0 --workers 1
-      --loop uvloop --lifespan on --timeout-graceful-shutdown 15
+      --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
     mem_limit: 8g

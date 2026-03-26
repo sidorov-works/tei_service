@@ -31,11 +31,16 @@ class DefaultConfig:
     OUTPUT_QUEUE_MAXSIZE = int(os.getenv("OUTPUT_QUEUE_MAXSIZE", "1000"))
     HEALTH_QUEUE_THRESHOLD = 0.9  # Порог переполненности для /health
 
-    # Настройки для работы с конкретной эмбеддинговой моделью ----------------------------------
+    # Настройки для работы с конкретной эмбеддинговой моделью ---------------------------------
     DEVICE = os.getenv("DEVICE", "cpu")  # или "cuda"
 
     # Название (идентификатор) модели на hugging face
     HUGGING_FACE_MODEL_NAME = os.getenv("HUGGING_FACE_MODEL_NAME", "ai-forever/FRIDA")
+
+    # Обработка NaN/Inf в эмбеддингах ---------------------------------------------------------
+    EMBEDDING_CLEAN_NAN = os.getenv("EMBEDDING_CLEAN_NAN", "true").lower() == "true"
+    EMBEDDING_NAN_REPLACEMENT = float(os.getenv("EMBEDDING_NAN_REPLACEMENT", "0.0"))
+    EMBEDDING_LOG_NAN = os.getenv("EMBEDDING_LOG_NAN", "true").lower() == "true"
 
     # Режим применения эндпойнта /tokenize ---------------------------------------------------- 
     # Оригинальный TEI возвращает полную информацию о токенах. 
