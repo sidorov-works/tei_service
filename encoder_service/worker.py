@@ -370,7 +370,8 @@ class ModelWorker:
                 
                 embedding: NDArray[np.float64] = self.encoder.encode(
                     sentences=text,
-                    prompt_name=task.prompt_name
+                    prompt_name=task.prompt_name,
+                    show_progress_bar=False
                 )
                 # Если требуется нормализация
                 if task.normalize:
@@ -409,7 +410,8 @@ class ModelWorker:
                     # Кодируем порцию
                     embeddings_batch: NDArray[np.float64] = self.encoder.encode(
                         sentences=batch,
-                        prompt_name=task.prompt_name
+                        prompt_name=task.prompt_name,
+                        show_progress_bar=False
                     )
                     
                     # Собираем результаты
