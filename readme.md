@@ -9,7 +9,7 @@ TEI-совместимый сервис для векторизации текс
 - **Асинхронная архитектура** — очереди задач сглаживают пиковую нагрузку
 - **Мультиплатформенность** — поддержка CPU, NVIDIA GPU (CUDA), Apple Silicon (MPS)
 - **Расширенная валидация** — защита от перегрузки на уровне эндпоинтов
-- **Docker-ready** — готовые образы для Windows и Linux с GPU поддержкой
+- **Docker-ready** — готовые образы для Linux и Windows с GPU поддержкой
 
 ## Быстрый старт
 
@@ -71,12 +71,19 @@ uvicorn encoder_service.main:app --port 8262 --workers 1
 
 ## Запуск в Docker
 
-### Docker на Windows (NVIDIA GPU)
+### Требования
 
-**Требования:**
+**Для Linux:**
+- Docker Engine
+- NVIDIA Container Toolkit (для GPU)
+- NVIDIA драйверы (для GPU)
+
+**Для Windows:**
 - Docker Desktop с WSL2 backend
 - NVIDIA Container Toolkit
 - NVIDIA драйверы
+
+### Подготовка
 
 ```bash
 # 1. Создайте необходимые папки
@@ -88,54 +95,38 @@ cp .env.example .env.encoder1
 cp .env.example .env.encoder2
 
 # 3. Отредактируйте .env.encoder1 и .env.encoder2:
-# HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
-# MAX_MODEL_BATCH_SIZE=32
-# DEVICE=cuda
+#    HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
+#    MAX_MODEL_BATCH_SIZE=32
+#    DEVICE=cuda
+```
 
-# 4. Запустите сервисы (базовый образ соберется автоматически)
+### Сборка и запуск
+
+```bash
+# 4. Соберите базовый образ
+docker build -f dockerfile.base -t encoder-base:latest .
+
+# 5. Запустите сервисы
 docker-compose up --build
 
-# Проверка GPU
+# 6. Проверка GPU (опционально)
 docker exec encoder_service_1 nvidia-smi
 ```
 
-**Важные настройки для Windows:**
-- В Docker Desktop → Settings → Resources → WSL Integration → включите интеграцию
-- Убедитесь, что файлы имеют правильные окончания строк (LF для скриптов в контейнере)
-- Используйте `git config --global core.autocrlf input` перед клонированием
-
-### Docker на Linux (NVIDIA GPU)
+### Проверка работоспособности
 
 ```bash
-# Установка Docker и NVIDIA Container Toolkit
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+# Health check
+curl http://localhost:8260/health
 
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo systemctl restart docker
+# Информация о модели
+curl http://localhost:8260/info
 
-# Запуск сервисов
-mkdir models logs
-cp .env.example .env
-cp .env.example .env.encoder1
-
-# Редактируем .env.encoder1:
-# DEVICE=cuda
-# MAX_MODEL_BATCH_SIZE=32
-
-# Сборка и запуск
-docker-compose up --build
-
-# Или для одного экземпляра:
-docker run --gpus all \
-  -p 8260:8260 \
-  -v $(pwd)/models:/app/models \
-  -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  --env-file .env.encoder1 \
-  encoder-service:latest \
-  uvicorn encoder_service.main:app --host 0.0.0.0 --port 8260
+# Получение эмбеддинга
+curl -X POST http://localhost:8260/embed \
+  -H "Authorization: Bearer your_secret_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "Привет, мир!"}'
 ```
 
 ## Docker файлы
@@ -155,10 +146,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Копируем requirements для CUDA (без torch)
 COPY requirements.cuda.txt .
 
-# Устанавливаем зависимости (без torch)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.cuda.txt
 
@@ -172,7 +161,6 @@ ENV PYTHONUNBUFFERED=1 \
 ```dockerfile
 FROM encoder-base:latest
 
-# Устанавливаем PyTorch с CUDA
 RUN pip install --no-cache-dir torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
 
 COPY . .
@@ -354,7 +342,7 @@ packaging==25.0
 portalocker==3.2.0
 pydantic==2.12.5
 pydantic_core==2.41.5
-pygelf==0.4.3
+pygelf==4.0.3
 python-dotenv==1.2.1
 python-jose==3.5.0
 python-json-logger==4.0.0
@@ -383,7 +371,6 @@ logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.1.7
 ## Procfile (для локального запуска)
 
 ```
-# Запуск через honcho
 encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT} --workers 1 --lifespan on --timeout-graceful-shutdown 10
 ```
 
@@ -475,6 +462,13 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 ]
 ```
 
+#### Режимы токенизации
+
+Режим задается переменной окружения `TOKENIZE_MODE`:
+
+- **`full`** (по умолчанию) — возвращает полную информацию о токенах (id, текст, флаг special, позиции в тексте)
+- **`lite`** — возвращает только id токенов, остальные поля пустые (быстрее, меньше трафик)
+
 ## Конфигурация
 
 ### Переменные окружения
@@ -498,9 +492,12 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 | **Очереди** | | |
 | `INPUT_QUEUE_MAXSIZE` | Макс. размер входящей очереди | `1000` |
 | `OUTPUT_QUEUE_MAXSIZE` | Макс. размер исходящей очереди | `1000` |
-| `HEALTH_QUEUE_THRESHOLD` | Порог заполнения очереди для health check | `0.9` |
 | **Токенизация** | | |
 | `TOKENIZE_MODE` | Режим токенизации (`full` / `lite`) | `full` |
+| **Обработка NaN** | | |
+| `EMBEDDING_CLEAN_NAN` | Заменять NaN/Inf в эмбеддингах | `true` |
+| `EMBEDDING_NAN_REPLACEMENT` | Значение для замены NaN/Inf | `0.0` |
+| `EMBEDDING_LOG_NAN` | Логировать факт замены NaN/Inf | `true` |
 | **Rate limiting** | | |
 | `RATE_LIMIT_INFO` | Лимит запросов к /info | `500/minute` |
 | `RATE_LIMIT_HEALTH` | Лимит запросов к /health | `500/minute` |
@@ -527,6 +524,10 @@ MAX_TEXT_LENGTH=10000
 MAX_TOTAL_BATCH_LENGTH=500000
 
 TOKENIZE_MODE=lite
+
+EMBEDDING_CLEAN_NAN=true
+EMBEDDING_NAN_REPLACEMENT=0.0
+EMBEDDING_LOG_NAN=true
 
 RATE_LIMIT_INFO=500/minute
 RATE_LIMIT_HEALTH=500/minute
@@ -630,6 +631,17 @@ docker exec encoder_service_1 nvidia-smi
 - Уменьшите `MAX_MODEL_BATCH_SIZE`
 - Установите `MAX_SERVICE_BATCH_SIZE` меньше
 - Увеличьте `shm_size` в docker-compose
+
+### Проблемы с окончаниями строк (Windows)
+```bash
+# Перед клонированием настройте Git
+git config --global core.autocrlf input
+
+# Или создайте .gitattributes в корне проекта:
+echo "* text=auto" > .gitattributes
+echo "*.py text eol=lf" >> .gitattributes
+echo "dockerfile* text eol=lf" >> .gitattributes
+```
 
 ## Структура проекта
 
