@@ -30,7 +30,6 @@ import time
 import setproctitle
 setproctitle.setproctitle("encoder_service")
 
-from shared.auth_service import require_header_secret as require_auth
 from shared.tei_models import (
     EmbedRequest,
     TokenizeRequest,
@@ -45,6 +44,10 @@ from encoder_service.worker import (
     clean_text
 )
 from encoder_service.dispatcher import ResultDispatcher
+
+from shared.auth_service import require_header_secret
+require_auth = require_header_secret if config.REQUIRE_AUTH else lambda: None
+
 
 
 # ======================================================================
