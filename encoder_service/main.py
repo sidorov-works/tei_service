@@ -3,17 +3,17 @@
 Предоставляет TEI-совместимый HTTP API для работы с эмбеддинговыми моделями.
 """
 
-# Настройка логгера должна быть первым делом
-from logger_utils import configure_root, get_logger
 from shared.config import config
-configure_root(
+
+# Получение кастомного логера с одновременной настройкой root
+from logger_utils import get_logger
+logger = get_logger(
+    "ENCODER_SERVICE",
     level=config.LOGGING_LEVEL, 
-    log_file=config.LOG_PATH / "app.log",
+    log_file=str(config.LOG_PATH / "app.log"),
     fmt=config.LOG_FORMAT,
     docker_mode=config.DOCKER_ENV
 )
-
-logger = get_logger("ENCODER_SERVICE")
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends, Response
