@@ -47,4 +47,4 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.2
 uvicorn==0.40.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.1.7
+logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0

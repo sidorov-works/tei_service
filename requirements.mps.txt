@@ -22,7 +22,7 @@ idna==3.11
 Jinja2==3.1.6
 joblib==1.5.3
 limits==5.8.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.1.7
+logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0
 MarkupSafe==3.0.3
 mpmath==1.3.0
 networkx==3.6.1
