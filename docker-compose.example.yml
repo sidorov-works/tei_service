@@ -1,8 +1,8 @@
 # docker-compose.yml
 
 services:
-  # Первый экземпляр
-  encoder1:
+  # Первый экземпляр - энкодер (frida)
+  encoder_frida:
     build:
       context: .
       dockerfile: dockerfile.service
@@ -12,14 +12,14 @@ services:
       # Общая папка для моделей
       - ./models:/app/models
       # Отдельная папка для логов первого сервиса
-      - ./logs/encoder1:/app/logs
+      - ./logs/encoder_frida:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.encoder1 # специфические параметры первого сервиса
+      - .env.frida    # специфические параметры первого сервиса
     environment:
       - PORT=8260
       - DOCKER_ENV=true
-    container_name: encoder_service_1
+    container_name: encoder_frida
     restart: unless-stopped
     command: >
       uvicorn main:app
@@ -36,29 +36,29 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-  # Второй экземпляр
-  encoder2:
+  # Второй экземпляр - классификатор (sismetanin toxic pikabu)
+  classifier_pikabu:
     build:
       context: .
       dockerfile: dockerfile.service
     ports:
-      - "8261:8261"
+      - "8265:8265"
     volumes:
       # Общая папка для моделей
       - ./models:/app/models
       # Отдельная папка для логов второго сервиса
-      - ./logs/encoder2:/app/logs
+      - ./logs/classifier_pikabu:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
       - .env.encoder2 # специфические параметры второго сервиса
     environment:
-      - PORT=8261
+      - PORT=8265
       - DOCKER_ENV=true
-    container_name: encoder_service_2
+    container_name: classifier_pikabu
     restart: unless-stopped
     command: >
       uvicorn main:app
-      --port 8261 --host 0.0.0.0 --workers 1
+      --port 8265 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
