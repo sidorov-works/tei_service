@@ -22,7 +22,7 @@ services:
     container_name: encoder_service_1
     restart: unless-stopped
     command: >
-      uvicorn encoder_service.main:app
+      uvicorn main:app
       --port 8260 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
@@ -57,7 +57,7 @@ services:
     container_name: encoder_service_2
     restart: unless-stopped
     command: >
-      uvicorn encoder_service.main:app
+      uvicorn main:app
       --port 8261 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true

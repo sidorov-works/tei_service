@@ -1,7 +1,8 @@
+# workers/encoder_worker.py
+
 """
 Модуль воркера для Encoder Service.
 Содержит класс ModelWorker - единственного владельца модели SentenceTransformer,
-а также определения типов задач и структур данных для очереди.
 """
 
 import os
@@ -12,38 +13,16 @@ from shared.config import config
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import snapshot_download
 import asyncio
-from typing import Any, Optional, List
-import time
-from dataclasses import dataclass
-from enum import Enum
+from typing import List
 import math
-from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
-import re
+from shared.task import Task, TaskType, TaskResult
+
+from workers.base_worker import BaseWorker
 
 import logging
 logger = logging.getLogger(__name__)
-
-
-# ======================================================================
-# Вспомогательные функции для очистки данных
-# ======================================================================
-
-_CLEAN_PATTERN = re.compile(r'[^\w\s.,!?:\-\'\"()]', flags=re.UNICODE)
-
-def clean_text(text: str) -> str:
-    """
-    Очистка текста перед кодированием.
-    
-    Удаляет нестандартные символы, которые могут вызвать проблемы
-    с токенизатором или кодированием.
-    """
-    if not text:
-        return ""
-    cleaned_text = _CLEAN_PATTERN.sub('', text)
-    cleaned_text = ' '.join(cleaned_text.split())
-    return cleaned_text
 
 
 def nan_inf_embedding_clean(embedding: List[float]) -> List[float]:
@@ -85,60 +64,7 @@ def nan_inf_embedding_clean(embedding: List[float]) -> List[float]:
     return cleaned
 
 
-# ======================================================================
-# Типы задач и структуры данных
-# ======================================================================
-
-class TaskType(Enum):
-    """
-    Типы задач, которые может выполнять воркер.
-    """
-    ENCODE = "encode"                   # /embed для одного текста
-    ENCODE_BATCH = "encode_batch"       # /embed для батча
-    TOKENIZE = "tokenize"               # /tokenize и для одного текста, и для батча
-
-
-@dataclass
-class Task:
-    """
-    Задача для воркера.
-    
-    Attributes:
-        task_id: Уникальный идентификатор задачи (UUID)
-        task_type: Тип задачи
-        data: Данные для обработки (текст или список текстов)
-        created_at: Временная метка создания задачи
-        prompt_name: Имя промпта для добавления префикса запроса
-        truncate: Обрезать ли тексты длиннее max_input_length
-        normalize: Нормализовать ли векторы 
-    """
-    task_id: str
-    task_type: TaskType
-    data: Any
-    created_at: float
-    prompt_name: Optional[str] = None
-    truncate: bool = True # только для /embed
-    normalize: bool = False # только для /embed
-
-
-@dataclass
-class TaskResult:
-    """
-    Результат выполнения задачи.
-    
-    Attributes:
-        task_id: ID задачи, к которой относится результат
-        success: Флаг успешности выполнения
-        result: Результат (если success=True)
-        error: Сообщение об ошибке (если success=False)
-    """
-    task_id: str
-    success: bool
-    result: Any = None
-    error: str = None
-
-
-class ModelWorker:
+class EncoderWorker(BaseWorker):
     """
     Единственный владелец модели SentenceTransformer.
     
@@ -154,15 +80,11 @@ class ModelWorker:
     """
     
     def __init__(self, input_queue: asyncio.Queue, output_queue: asyncio.Queue):
-        self.input_queue = input_queue
-        self.output_queue = output_queue
+        super().__init__(input_queue, output_queue)
         self.encoder = None
         self.tokenizer = None
-        self.running = True
-        self.tasks_processed = 0
-        self.total_processing_time = 0.0
         
-    async def start(self):
+    async def load_model(self):
         """
         Загружает модель и запускает основной цикл обработки задач.
         """
@@ -171,7 +93,7 @@ class ModelWorker:
             
             # Скачиваем модель в локальную папку, если её нет
             safe_model_name = model_id.replace('/', '--')
-            model_path = config.MODEL_PATH / safe_model_name
+            model_path = config.SENTENCE_TRANSFORMERS_MODEL_PATH / safe_model_name
             
             if not model_path.exists():
                 logger.info(f"Модель не найдена, скачиваю {model_id} в {model_path}")
@@ -179,10 +101,10 @@ class ModelWorker:
                 snapshot_download(
                     repo_id=model_id,
                     local_dir=str(model_path),
-                    local_dir_use_symlinks=False,
+                    # local_dir_use_symlinks=False, # устаревший параметр
                     ignore_patterns=[],
                     max_workers=4,
-                    resume_download=True
+                    # resume_download=True          # устаревший параметр
                 )
                 logger.info(f"Модель успешно скачана в {model_path}")
             else:
@@ -199,27 +121,11 @@ class ModelWorker:
             self.tokenizer = self.encoder.tokenizer
             
             logger.info(f"Worker: модель загружена, начинаю обработку задач")
-
-            # Основной цикл обработки задач
-            while self.running:
-                try:
-                    # Ждем новую задачу с таймаутом, чтобы проверять флаг running
-                    task = await asyncio.wait_for(
-                        self.input_queue.get(), 
-                        timeout=1.0
-                    )
-                    
-                    await self._process_task(task)
-                    self.input_queue.task_done()
-                    
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Worker: ошибка в основном цикле: {e}")
             
         except Exception as e:
             logger.error(f"Worker: критическая ошибка при загрузке модели: {e}")
             self.running = False
+            raise
     
     def _build_token_info(self, encodings):
         """
@@ -344,57 +250,21 @@ class ModelWorker:
         tokens = self.tokenizer.encode(text, add_special_tokens=True)
         return len(tokens) > self.encoder.max_seq_length
 
-    async def _process_task(self, task: Task):
+    async def process_task(self, task: Task):
         """
         Обрабатывает одну задачу.
         
         Это единственное место во всем сервисе, где используется модель.
         """
-        start_time = time.time()
-        logger.debug(f"Worker: начал обработку задачи {task.task_id} типа {task.task_type}")
-
-        # ОЧИСТКА ТЕКСТА - ЕДИНОЕ МЕСТО 
-        # Очищаем все текстовые данные для всех типов задач
-        if task.task_type in (TaskType.ENCODE, TaskType.ENCODE_BATCH, TaskType.TOKENIZE):
-            if isinstance(task.data, str):
-                task.data = clean_text(task.data)
-            elif isinstance(task.data, list):
-                task.data = [clean_text(t) if isinstance(t, str) else t for t in task.data]
-
-        
         try:
             result_data = None
             
-            # ===== EMBEDDINGS =====
+            # ===== EMBEDDINGS =====        
             if task.task_type == TaskType.ENCODE:
-                # Одиночное кодирование
-                text = task.data
-
-                # Применяем обрезку если нужно
-                if task.truncate:
-                    texts = self._truncate_texts([text])
-                    text = texts[0]
-                # else: проверяем длину и кидаем ошибку если превышает
-                elif self._is_too_long(text):
-                    raise ValueError(
-                        f"Text exceeds max_input_length ({self.encoder.max_seq_length} "
-                        "tokens) and truncate=false"
-                    )
-                
-                embedding: NDArray[np.float64] = self.encoder.encode(
-                    sentences=text,
-                    prompt_name=task.prompt_name,
-                    show_progress_bar=False
-                )
-                # Если требуется нормализация
-                if task.normalize:
-                    embedding = self._normalize_embedding(embedding)
-                # TEI требует список списков даже для одного текста
-                result_data = [nan_inf_embedding_clean(embedding.tolist())]
-                
-            elif task.task_type == TaskType.ENCODE_BATCH:
                 # Пакетное кодирование с разбивкой по MAX_MODEL_BATCH_SIZE
-                texts = task.data
+
+                # Если передали одиночный текст, делаем из него список из одного элемента
+                texts = task.data if isinstance(task.data, list) else [task.data]
 
                 # Применяем обрезку ко всем текстам
                 if task.truncate:
@@ -450,28 +320,36 @@ class ModelWorker:
                 )
                 result_data = self._build_token_info(encodings)
             
-            # Отправляем успешный результат
-            await self.output_queue.put(TaskResult(
-                task_id=task.task_id,
-                success=True,
-                result=result_data
-            ))
-            
-            processing_time = time.time() - start_time
-            self.tasks_processed += 1
-            self.total_processing_time += processing_time
-            
-            logger.debug(f"Worker: завершил задачу {task.task_id} за {processing_time:.3f}с")
+            return result_data
             
         except Exception as e:
             logger.error(f"Worker: ошибка при обработке задачи {task.task_id}: {e}")
-            await self.output_queue.put(TaskResult(
-                task_id=task.task_id,
-                success=False,
-                error=str(e)
-            ))
+            raise
     
-    async def stop(self):
-        """Останавливает воркер и освобождает ресурсы."""
-        self.running = False
-        logger.info(f"Worker: остановлен. Обработано задач: {self.tasks_processed}")
+    def get_model_info(self) -> dict:
+        """Возвращает информацию о модели для эндпоинта /info."""
+        from shared.tei_models import PromptInfo
+        
+        prompts = []
+        if (
+            hasattr(self.encoder, "prompts") 
+            and self.encoder.prompts 
+            and isinstance(self.encoder.prompts, dict)
+        ):
+            # Будем сообщать только о тех промптах, у которых не пустой текст
+            prompts = [
+                PromptInfo(name=prompt_name, text=prompt_text)
+                for prompt_name, prompt_text in self.encoder.prompts.items()
+                if prompt_text
+            ]
+        
+        return {
+            "model_id": config.HUGGING_FACE_MODEL_NAME,
+            "max_input_length": self.encoder.max_seq_length if self.encoder else None,
+            "max_client_batch_size": config.MAX_SERVICE_BATCH_SIZE,
+            "prompts": prompts
+        }
+    
+    def is_healthy(self) -> bool:
+        """Проверяет, загружена ли модель."""
+        return self.encoder is not None

@@ -1,3 +1,5 @@
+# main.py
+
 """
 Главный модуль Encoder Service.
 Предоставляет TEI-совместимый HTTP API для работы с эмбеддинговыми моделями.
@@ -8,7 +10,7 @@ from shared.config import config
 # Получение кастомного логера с одновременной настройкой root
 from logger_utils import get_logger
 logger = get_logger(
-    "ENCODER_SERVICE",
+    f"{config.SERVER_TYPE.upper()}_SERVICE",
     level=config.LOGGING_LEVEL, 
     log_file=str(config.LOG_PATH / "app.log"),
     fmt=config.LOG_FORMAT,
@@ -23,31 +25,53 @@ import slowapi
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import asyncio
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Union
+from functools import wraps
 import uuid
 import time
 
 import setproctitle
-setproctitle.setproctitle("encoder_service")
+setproctitle.setproctitle(f"{config.SERVER_TYPE.lower()}_service")
 
 from shared.tei_models import (
     EmbedRequest,
     TokenizeRequest,
     TokenInfo,
+    PredictRequest,
+    LabelScore,
     PromptInfo,
     InfoResponse
 )
-from encoder_service.worker import (
-    ModelWorker, 
-    Task, 
-    TaskType, 
-    clean_text
-)
-from encoder_service.dispatcher import ResultDispatcher
+from workers.encoder_worker import EncoderWorker
+from workers.classifier_worker import ClassifierWorker
+from dispatcher import ResultDispatcher
+from shared.task import Task, TaskType
+from enum import Enum
 
 from shared.auth_service import require_header_secret
 require_auth = require_header_secret if config.REQUIRE_AUTH else lambda: None
 
+
+# ======================================================================
+# Ограничение доступности эндпойнтов в зависимости от типа сервиса
+# ======================================================================
+
+class ServiceType(str, Enum):
+    ENCODER = "encoder"
+    CLASSIFIER = "classifier"
+
+def service_type(allowed_types: List[ServiceType]):
+    def decorator(endpoint_func):
+        @wraps(endpoint_func)
+        async def wrapper(*args, **kwargs):
+            if config.SERVER_TYPE not in [t.value for t in allowed_types]:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Endpoint not found. Service running in {config.SERVER_TYPE} mode."
+                )
+            return await endpoint_func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 # ======================================================================
@@ -57,7 +81,14 @@ require_auth = require_header_secret if config.REQUIRE_AUTH else lambda: None
 input_queue = asyncio.Queue(maxsize=config.INPUT_QUEUE_MAXSIZE)
 output_queue = asyncio.Queue(maxsize=config.OUTPUT_QUEUE_MAXSIZE)
 
-worker = ModelWorker(input_queue, output_queue)
+# Выбираем тип воркера в зависимости от SERVER_TYPE
+if config.SERVER_TYPE == "classifier":
+    worker = ClassifierWorker(input_queue, output_queue)
+elif config.SERVER_TYPE == "encoder":
+    worker = EncoderWorker(input_queue, output_queue)
+else:
+    raise ValueError(f"Unknown SERVER_TYPE: {config.SERVER_TYPE}. Must be 'encoder' or 'classifier'")
+
 dispatcher = ResultDispatcher()
 
 # Информация о модели
@@ -85,17 +116,14 @@ async def lifespan(app: FastAPI):
     cleaner_task = asyncio.create_task(dispatcher.cleanup_stale())
     
     # Ждем загрузки модели
-    while worker.encoder is None and worker.running:
+    while not worker.is_healthy() and worker.running:
         await asyncio.sleep(0.1)
     
     # Формируем информацию о модели в формате TEI
-    if worker.encoder:
-        model_info = InfoResponse(
-            model_id=config.HUGGING_FACE_MODEL_NAME,
-            max_input_length=worker.encoder.max_seq_length,
-            max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE
-        )
-        logger.info(f"Encoder Service запущен, модель {config.HUGGING_FACE_MODEL_NAME} загружена")
+    if worker.is_healthy():
+        model_info = worker.get_model_info()
+        model_info = InfoResponse(**model_info)
+        logger.info(f"Сервис запущен, модель {model_info.model_id} загружена")
     else:
         model_info = InfoResponse(
             model_id=config.HUGGING_FACE_MODEL_NAME,
@@ -234,41 +262,23 @@ async def submit_task(
 
 @app.get("/info", response_model=InfoResponse)
 @limiter.limit(config.RATE_LIMIT_INFO)
-async def get_encoder_info(request: Request):
+async def get_info(request: Request):
     """
     TEI-совместимый endpoint информации о модели
     """
-    if not worker.encoder:
+    if not worker.is_healthy():
         return InfoResponse(
             model_id=config.HUGGING_FACE_MODEL_NAME,
             max_input_length=None,
             max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE,
             prompts=[]
         )
-    
-    if (
-        hasattr(worker.encoder, "prompts") 
-        and worker.encoder.prompts 
-        and isinstance(worker.encoder.prompts, dict)
-    ):
-        # Будем сообщать только о тех промптах, у которых не пустой текст
-        prompts = [
-            PromptInfo(name=prompt_name, text=prompt_text)
-            for prompt_name, prompt_text in worker.encoder.prompts.items()
-            if prompt_text
-        ]
-    else:
-        prompts = []
-
-    return InfoResponse(
-        model_id=config.HUGGING_FACE_MODEL_NAME,
-        max_input_length=worker.encoder.max_seq_length,
-        max_client_batch_size=config.MAX_SERVICE_BATCH_SIZE,
-        prompts=prompts
-    )
+    model_info = worker.get_model_info()
+    return InfoResponse(**model_info)
 
 
 @app.post("/embed", response_model=None)
+@service_type([ServiceType.ENCODER])  # Только для энкодера
 @limiter.limit(config.RATE_LIMIT_EMBED)
 async def embed(
     request: Request,
@@ -281,29 +291,21 @@ async def embed(
     Возвращает список списков float, даже для одного текста.
     """
     try:
-        if isinstance(embed_request.inputs, str):          
-            embeddings: List[List[float]] = await submit_task(
-                task_type=TaskType.ENCODE,
-                data=embed_request.inputs,
-                prompt_name=embed_request.prompt_name,
-                task_timeout=config.EMBED_TIMEOUT,
-                normalize=embed_request.normalize,
-                truncate=embed_request.truncate,
-            )
-            
-            return embeddings
+        if isinstance(embed_request.inputs, str):   
+            inputs = [embed_request.inputs] 
+        else:
+            inputs = embed_request.inputs   
+
+        embeddings: List[List[float]] = await submit_task(
+            task_type=TaskType.ENCODE,
+            data=inputs,
+            prompt_name=embed_request.prompt_name,
+            task_timeout=config.EMBED_TIMEOUT,
+            normalize=embed_request.normalize,
+            truncate=embed_request.truncate,
+        )
         
-        else:            
-            embeddings: List[List[float]] = await submit_task(
-                task_type=TaskType.ENCODE_BATCH,
-                data=embed_request.inputs,
-                prompt_name=embed_request.prompt_name,
-                task_timeout=config.EMBED_TIMEOUT,
-                normalize=embed_request.normalize,
-                truncate=embed_request.truncate
-            )
-            
-            return embeddings
+        return embeddings
             
     except HTTPException:
         raise
@@ -316,7 +318,8 @@ async def embed(
 
 
 @app.post("/tokenize", response_model=None)
-@limiter.limit(config.RATE_LIMIT_COUNT_TOKENS)
+@service_type([ServiceType.ENCODER])  # Только для энкодера
+@limiter.limit(config.RATE_LIMIT_TOKENIZE)
 async def tokenize(
     request: Request,
     tokenize_request: TokenizeRequest,
@@ -349,6 +352,49 @@ async def tokenize(
             status_code=500,
             detail=f"Internal error: {str(e)}"
         )
+    
+
+@app.post("/predict")
+@service_type([ServiceType.CLASSIFIER])  # Только для классификатора
+@limiter.limit(config.RATE_LIMIT_PREDICT)
+async def predict(
+    request: Request,
+    predict_request: PredictRequest,
+    _: None = Depends(require_auth)
+):
+    """
+    TEI-совместимый endpoint для классификации.
+    
+    ВАЖНО:
+    В отличие от /embed и /tokenize эндпойнт /predict в случае запроса 
+    для одиночного текста возвращает не массив массивов, 
+    а просто массив структур List[LabelScore].
+    В случае же батча - привычный массив массивов List[List[LabelScore]]
+    """
+    logger.info(f"predict endpoint called with: {predict_request}")
+    try:
+        is_single = isinstance(predict_request.inputs, str)
+        if is_single:
+            inputs = [predict_request.inputs]
+        else:
+            inputs = predict_request.inputs
+            
+        predictions: List[List[LabelScore]] = await submit_task(
+            task_type=TaskType.PREDICT,
+            data=inputs,
+            task_timeout=config.PREDICT_TIMEOUT
+        )
+        
+        return predictions[0] if is_single else predictions
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"predict endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
 
 
 @app.get("/health")
@@ -361,8 +407,8 @@ async def health_check(request: Request):
         - 200 OK с пустым телом, если сервис здоров
         - 503 Service Unavailable, если сервис не может обрабатывать запросы
     """
-    if worker.encoder is None:
-        logger.warning("Health check failed: encoder not loaded")
+    if not worker.is_healthy():
+        logger.warning("Health check failed: worker not healthy")
         return Response(status_code=503)
     
     if input_queue.qsize() > config.INPUT_QUEUE_MAXSIZE * config.HEALTH_QUEUE_THRESHOLD:

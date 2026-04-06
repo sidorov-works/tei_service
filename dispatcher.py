@@ -1,3 +1,5 @@
+# dispatcher.py
+
 """
 Модуль диспетчера результатов для Encoder Service.
 Связывает задачи из очереди с ожидающими их Future и очищает зависшие задачи.
@@ -5,7 +7,7 @@
 
 import asyncio
 import time
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple
 import concurrent.futures
 
 import logging

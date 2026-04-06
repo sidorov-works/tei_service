@@ -1,10 +1,13 @@
-# Encoder Service
+# TEI Service
 
-TEI-совместимый сервис для векторизации текста с поддержкой моделей Sentence Transformers.
+TEI-совместимый сервис для векторизации текста и классификации. Поддерживает два режима работы:
+- **Encoder** — эмбеддинги текста через Sentence Transformers
+- **Classifier** — классификация текста через sequence classification модели
 
 ## Особенности
 
-- **TEI-совместимость** — эндпоинты `/embed`, `/tokenize`, `/info`, `/health` соответствуют спецификации Hugging Face TEI
+- **TEI-совместимость** — эндпоинты `/embed`, `/tokenize`, `/predict`, `/info`, `/health` соответствуют спецификации Hugging Face TEI
+- **Два режима работы** — один сервис может работать как энкодер или как классификатор (выбирается через `SERVER_TYPE`)
 - **Потокобезопасность** — единственный воркер гарантирует корректную работу с не-thread-safe моделями
 - **Асинхронная архитектура** — очереди задач сглаживают пиковую нагрузку
 - **Мультиплатформенность** — поддержка CPU, NVIDIA GPU (CUDA), Apple Silicon (MPS)
@@ -13,12 +16,12 @@ TEI-совместимый сервис для векторизации текс
 
 ## Быстрый старт
 
-### Локальный запуск (Mac с Metal)
+### Режим энкодера (Mac с Metal)
 
 ```bash
 # Клонирование
 git clone <repository-url>
-cd encoder-service
+cd tei-service
 
 # Создание виртуального окружения
 python -m venv venv
@@ -27,9 +30,10 @@ source venv/bin/activate
 # Установка зависимостей
 pip install -r requirements.mps.txt
 
-# Настройка окружения
+# Настройка окружения для энкодера
 cp .env.frida.example .env.frida
 # Отредактируйте .env.frida:
+# SERVER_TYPE=encoder
 # DEVICE=mps
 # HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 
@@ -37,7 +41,21 @@ cp .env.frida.example .env.frida
 honcho start -f procfile -e .env.frida
 
 # Или напрямую uvicorn
-uvicorn encoder_service.main:app --port 8262 --workers 1
+uvicorn main:app --port 8262 --workers 1
+```
+
+### Режим классификатора (Mac с Metal)
+
+```bash
+# Настройка окружения для классификатора
+cp .env.pikabu.example .env.pikabu
+# Отредактируйте .env.pikabu:
+# SERVER_TYPE=classifier
+# DEVICE=mps
+# HUGGING_FACE_MODEL_NAME=sismetanin/rubert-toxic-pikabu-2ch
+
+# Запуск
+honcho start -f procfile -e .env.pikabu
 ```
 
 ### Локальный запуск (Linux с CPU/GPU)
@@ -63,10 +81,11 @@ pip install -r requirements.cuda.txt
 
 # Настройка .env
 cp .env.example .env
+# Укажите SERVER_TYPE=encoder или SERVER_TYPE=classifier
 # Укажите DEVICE=cuda или DEVICE=cpu
 
 # Запуск
-uvicorn encoder_service.main:app --port 8262 --workers 1
+uvicorn main:app --port 8262 --workers 1
 ```
 
 ## Запуск в Docker
@@ -91,10 +110,11 @@ mkdir models logs
 
 # 2. Настройте .env файлы
 cp .env.example .env
-cp .env.example .env.encoder1
-cp .env.example .env.encoder2
+cp .env.encoder1.example .env.encoder1
+cp .env.encoder2.example .env.encoder2
 
 # 3. Отредактируйте .env.encoder1 и .env.encoder2:
+#    SERVER_TYPE=encoder
 #    HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 #    MAX_MODEL_BATCH_SIZE=32
 #    DEVICE=cuda
@@ -104,13 +124,13 @@ cp .env.example .env.encoder2
 
 ```bash
 # 4. Соберите базовый образ
-docker build -f dockerfile.base -t encoder-base:latest .
+docker build -f dockerfile.base -t tei-base:latest .
 
 # 5. Запустите сервисы
 docker-compose up --build
 
 # 6. Проверка GPU (опционально)
-docker exec encoder_service_1 nvidia-smi
+docker exec tei_service_1 nvidia-smi
 ```
 
 ### Проверка работоспособности
@@ -122,11 +142,17 @@ curl http://localhost:8260/health
 # Информация о модели
 curl http://localhost:8260/info
 
-# Получение эмбеддинга
+# Получение эмбеддинга (только в режиме энкодера)
 curl -X POST http://localhost:8260/embed \
   -H "Authorization: Bearer your_secret_key_here" \
   -H "Content-Type: application/json" \
   -d '{"inputs": "Привет, мир!"}'
+
+# Классификация текста (только в режиме классификатора)
+curl -X POST http://localhost:8260/predict \
+  -H "Authorization: Bearer your_secret_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "Ты идиот!"}'
 ```
 
 ## Docker файлы
@@ -159,7 +185,7 @@ ENV PYTHONUNBUFFERED=1 \
 ### dockerfile.service
 
 ```dockerfile
-FROM encoder-base:latest
+FROM tei-base:latest
 
 RUN pip install --no-cache-dir torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
 
@@ -178,7 +204,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 ```yaml
 services:
-  encoder1:
+  tei1:
     build:
       context: .
       dockerfile: dockerfile.service
@@ -186,17 +212,17 @@ services:
       - "8260:8260"
     volumes:
       - ./models:/app/models
-      - ./logs/encoder1:/app/logs
+      - ./logs/tei1:/app/logs
     env_file:
       - .env
-      - .env.encoder1
+      - .env.tei1
     environment:
       - PORT=8260
       - DOCKER_ENV=true
-    container_name: encoder_service_1
+    container_name: tei_service_1
     restart: unless-stopped
     command: >
-      uvicorn encoder_service.main:app
+      uvicorn main:app
       --port 8260 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
@@ -211,7 +237,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  encoder2:
+  tei2:
     build:
       context: .
       dockerfile: dockerfile.service
@@ -219,17 +245,17 @@ services:
       - "8261:8261"
     volumes:
       - ./models:/app/models
-      - ./logs/encoder2:/app/logs
+      - ./logs/tei2:/app/logs
     env_file:
       - .env
-      - .env.encoder2
+      - .env.tei2
     environment:
       - PORT=8261
       - DOCKER_ENV=true
-    container_name: encoder_service_2
+    container_name: tei_service_2
     restart: unless-stopped
     command: >
-      uvicorn encoder_service.main:app
+      uvicorn main:app
       --port 8261 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
@@ -273,7 +299,7 @@ idna==3.11
 Jinja2==3.1.6
 joblib==1.5.3
 limits==5.8.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.1.7
+logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0
 MarkupSafe==3.0.3
 mpmath==1.3.0
 networkx==3.6.1
@@ -284,7 +310,7 @@ pyasn1==0.6.2
 pycparser==3.0
 pydantic==2.12.5
 pydantic_core==2.41.5
-pygelf==0.4.3
+pygelf==4.0.3
 python-dotenv==1.2.1
 python-jose==3.5.0
 python-json-logger==4.0.0
@@ -365,22 +391,22 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.2
 uvicorn==0.40.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.1.7
+logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0
 ```
 
 ## Procfile (для локального запуска)
 
 ```
-encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT} --workers 1 --lifespan on --timeout-graceful-shutdown 10
+tei: uvicorn main:app --port ${TEI_SERVICE_PORT} --workers 1 --lifespan on --timeout-graceful-shutdown 10
 ```
 
 ## Эндпоинты
 
 ### `GET /info`
 
-Информация о загруженной модели и ее доступных промптах.
+Информация о загруженной модели. Доступен в обоих режимах.
 
-**Response**
+**Response для энкодера:**
 ```json
 {
   "model_id": "ai-forever/FRIDA",
@@ -393,16 +419,24 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 }
 ```
 
-*Примечание:* Поле `prompts` заполняется только для моделей, поддерживающих промпты. Для моделей без поддержки промптов возвращается пустой массив `[]`.
+**Response для классификатора:**
+```json
+{
+  "model_id": "sismetanin/rubert-toxic-pikabu-2ch",
+  "max_input_length": 512,
+  "max_client_batch_size": 128,
+  "prompts": []
+}
+```
 
 ### `GET /health`
 
-Проверка здоровья сервиса.
+Проверка здоровья сервиса. Доступен в обоих режимах.
 
 - `200 OK` — сервис готов принимать запросы
 - `503 Service Unavailable` — сервис не готов (модель не загружена, очереди переполнены)
 
-### `POST /embed`
+### `POST /embed` (только в режиме энкодера)
 
 Получение эмбеддингов текста.
 
@@ -426,7 +460,7 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 ]
 ```
 
-### `POST /tokenize`
+### `POST /tokenize` (только в режиме энкодера)
 
 Токенизация текста.
 
@@ -469,17 +503,54 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 - **`full`** (по умолчанию) — возвращает полную информацию о токенах (id, текст, флаг special, позиции в тексте)
 - **`lite`** — возвращает только id токенов, остальные поля пустые (быстрее, меньше трафик)
 
+### `POST /predict` (только в режиме классификатора)
+
+Классификация текста.
+
+**Request**
+```json
+{
+  "inputs": ["текст1", "текст2"],
+  "raw_scores": false,
+  "truncate": true
+}
+```
+
+**Response** — для одиночного текста возвращает массив объектов, для батча — массив массивов
+
+```json
+// Одиночный текст
+[
+  {"label": "toxic", "score": 0.98},
+  {"label": "non-toxic", "score": 0.02}
+]
+
+// Батч
+[
+  [
+    {"label": "toxic", "score": 0.98},
+    {"label": "non-toxic", "score": 0.02}
+  ],
+  [
+    {"label": "toxic", "score": 0.01},
+    {"label": "non-toxic", "score": 0.99}
+  ]
+]
+```
+
 ## Конфигурация
 
 ### Переменные окружения
 
 | Переменная | Описание | Значение по умолчанию |
 |------------|----------|---------------------|
+| **Режим работы** | | |
+| `SERVER_TYPE` | Тип сервиса (`encoder` или `classifier`) | `encoder` |
 | **Основные** | | |
 | `HUGGING_FACE_MODEL_NAME` | Имя модели на Hugging Face Hub | `ai-forever/FRIDA` |
 | `DEVICE` | Устройство (`cpu`, `cuda`, `mps`) | `cpu` |
-| `ENCODER_NAME` | Имя экземпляра сервиса | `frida` |
-| `ENCODER_SERVICE_PORT` | Порт для запуска (используется в Procfile) | `8262` |
+| `SERVER_NAME` | Имя экземпляра сервиса | `tei` |
+| `TEI_SERVICE_PORT` | Порт для запуска (используется в Procfile) | `8262` |
 | **Размеры батчей** | | |
 | `MAX_MODEL_BATCH_SIZE` | Размер батча для модели (GPU memory) | `32` |
 | `MAX_SERVICE_BATCH_SIZE` | Макс. размер батча для эндпоинта | `128` |
@@ -489,6 +560,7 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 | **Таймауты** | | |
 | `EMBED_TIMEOUT` | Таймаут операции /embed (сек) | `30.0` |
 | `TOKENIZE_TIMEOUT` | Таймаут операции /tokenize (сек) | `5.0` |
+| `PREDICT_TIMEOUT` | Таймаут операции /predict (сек) | `30.0` |
 | **Очереди** | | |
 | `INPUT_QUEUE_MAXSIZE` | Макс. размер входящей очереди | `1000` |
 | `OUTPUT_QUEUE_MAXSIZE` | Макс. размер исходящей очереди | `1000` |
@@ -502,55 +574,118 @@ encoder_service: uvicorn encoder_service.main:app --port ${ENCODER_SERVICE_PORT}
 | `RATE_LIMIT_INFO` | Лимит запросов к /info | `500/minute` |
 | `RATE_LIMIT_HEALTH` | Лимит запросов к /health | `500/minute` |
 | `RATE_LIMIT_EMBED` | Лимит запросов к /embed | `200/minute` |
-| `RATE_LIMIT_COUNT_TOKENS` | Лимит запросов к /tokenize | `600/minute` |
+| `RATE_LIMIT_TOKENIZE` | Лимит запросов к /tokenize | `600/minute` |
+| `RATE_LIMIT_PREDICT` | Лимит запросов к /predict | `200/minute` |
 
 ### Пример .env файла (общий)
 
 ```bash
 # .env
-INTERNAL_API_SECRET=your_secret_key_here
+
+# --- Безопасность и аутентификация ---
+
+INTERNAL_API_SECRET=your_extremely_safety_internal_api_secret
+REQUIRE_AUTH=false
+
+# --- Логирование ---
+
 LOG_PATH=logs
 LOGGING_LEVEL=INFO
+LOG_FORMAT="%(asctime)s | %(name)-24s | %(levelname)-8s | %(message)s"
 DOCKER_ENV=false
 
-EMBED_TIMEOUT=30.0
-TOKENIZE_TIMEOUT=5.0
+# --- Ограничения длин очередей ---
 
-INPUT_QUEUE_MAXSIZE=1000
 OUTPUT_QUEUE_MAXSIZE=1000
+INPUT_QUEUE_MAXSIZE=1000
 
-MAX_SERVICE_BATCH_SIZE=128
+# --- Обработка NaN/Inf в эмбеддингах ---
+EMBEDDING_CLEAN_NAN=true           # Заменять ли NaN/Inf
+EMBEDDING_NAN_REPLACEMENT=0.0      # На что заменять
+EMBEDDING_LOG_NAN=true             # Логировать ли факт замены
+
+
+# --- Лимиты на входящие запросы ---
+# При превышении лимитов сервис должен вызвать ValidationError
+
+# Максимально допустимое ДЛЯ СЕРВИСА кол-во текстов в батче. 
+# Этот параметр не имеет отношения к модели. 
+# Воркеры сервиса разбивают батч на подбатчи, подходящие для конкретной модели.
+# А данный параметр является именно предварительным ограничением самого сервиса, 
+# чтобы не произошел коллапс ресурсов.
+MAX_SERVICE_BATCH_SIZE=128 
+
+# Максимально допустимая длина одного текста в запросе. 
+# Этот параметр не связан напрямую со свойством max_seq_len конкретной эмбеддинговой модели 
+# Это просто подстраховка, чтобы не "забить" сервис заведомо огромными запросами
 MAX_TEXT_LENGTH=10000
+
+# Максимально допустимая суммарная длина текстов в батче
 MAX_TOTAL_BATCH_LENGTH=500000
 
-TOKENIZE_MODE=lite
 
-EMBEDDING_CLEAN_NAN=true
-EMBEDDING_NAN_REPLACEMENT=0.0
-EMBEDDING_LOG_NAN=true
+# --- Rate limiting и защита от Ddos ---
 
 RATE_LIMIT_INFO=500/minute
 RATE_LIMIT_HEALTH=500/minute
-RATE_LIMIT_EMBED=200/minute
-RATE_LIMIT_COUNT_TOKENS=600/minute
+RATE_LIMIT_EMBED=200/minute              
+RATE_LIMIT_TOKENIZE=600/minute
+RATE_LIMIT_PREDICT=200/minute
 ```
 
-### Пример .env.frida (для конкретной модели)
+### Пример .env.frida (для энкодера)
 
 ```bash
-# .env.frida
-ENCODER_NAME=frida
-ENCODER_SERVICE_PORT=8262
+# .env.frida.example
+
+SERVER_NAME=frida
+SERVER_TYPE=encoder
+
+SERVER_PORT=8260 # в коде не используется, нужно только для запуска с procfile
+
 DEVICE=mps
+
 HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 MAX_MODEL_BATCH_SIZE=32
+
+# Режим применения эндпойнта /tokenize:
+# Оригинальный TEI возвращает полную информацию о токенах. 
+# Это не всегда и не всем требуется. Например, для основного применения - подсчета 
+# длины текста в токенах - достаточно только определить длину списков с информацией о токенах, 
+# а сама информация не нужна. Поэтому предусматриваем режим "lite", 
+# в котором информация по токенам будет содержать типовые плейсхолдеры
+TOKENIZE_MODE=lite # или full
+
+# Тайм-ауты: максимальное время выполнения операции (от входа в эндпоинт до возврата результата)
+EMBED_TIMEOUT=30.0
+TOKENIZE_TIMEOUT=15.0
 ```
 
-### Пример .env.encoder1 (для Docker)
+### Пример .env.pikabu (для классификатора)
 
 ```bash
-# .env.encoder1
-ENCODER_NAME=frida
+# .env.pikabu.example
+
+SERVER_NAME=pikabu
+SERVER_TYPE=classifier
+
+SERVER_PORT=8265 # в коде не используется, нужно только для запуска с procfile
+
+DEVICE=mps
+
+HUGGING_FACE_MODEL_NAME=sismetanin/rubert-toxic-pikabu-2ch
+MAX_MODEL_BATCH_SIZE=32
+
+# Тайм-ауты: максимальное время выполнения операции (от входа в эндпоинт до возврата результата)
+PREDICT_TIMEOUT=30.0
+```
+
+### Пример .env.tei1 (для Docker)
+
+```bash
+# .env.tei1
+SERVER_NAME=frida
+SERVER_TYPE=encoder
 HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 DEVICE=cuda
 MAX_MODEL_BATCH_SIZE=32
@@ -571,30 +706,41 @@ curl -X POST http://localhost:8262/embed \
 
 ## Мониторинг и логи
 
-- Логи сохраняются в `logs/encoder_service/app.log`
+- Логи сохраняются в `logs/tei_service/app.log`
 - Уровень логирования настраивается через `LOGGING_LEVEL`
 - Health check эндпоинт доступен для систем мониторинга
 
-## Требования к системе
+## Структура проекта
 
-### Минимальные:
-- **CPU**: 2 cores, 4GB RAM
-- **GPU**: 4GB VRAM для моделей ~500MB
-
-### Рекомендуемые:
-- **CPU**: 4 cores, 8GB RAM
-- **GPU**: 8GB+ VRAM для больших батчей
-
-### Проверка GPU:
-```bash
-# Linux
-nvidia-smi
-
-# Docker
-docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
-
-# Python
-python -c "import torch; print(torch.cuda.is_available())"
+```
+tei-service/
+├── main.py                     # FastAPI приложение
+├── dispatcher.py               # ResultDispatcher
+├── workers/
+│   ├── __init__.py
+│   ├── base_worker.py          # BaseWorker (абстрактный)
+│   ├── encoder_worker.py       # EncoderWorker
+│   └── classifier_worker.py    # ClassifierWorker
+├── shared/
+│   ├── __init__.py
+│   ├── config.py               # Конфигурация
+│   ├── auth_service.py         # Аутентификация
+│   ├── task.py                 # Task, TaskType, TaskResult
+│   └── tei_models.py           # Pydantic модели
+├── models/                     # Кэш моделей
+│   ├── sentence-transformers/  # Для энкодера
+│   └── transformers/           # Для классификатора
+├── logs/                       # Логи
+├── requirements.mps.txt        # Зависимости для Mac
+├── requirements.cuda.txt       # Зависимости для Docker
+├── dockerfile.base             # Базовый Docker образ
+├── dockerfile.service          # Docker образ сервиса
+├── docker-compose.yml          # Docker Compose
+├── procfile                    # Для запуска через honcho
+├── .env.example                # Пример общей конфигурации
+├── .env.frida.example          # Пример конфигурации для FRIDA (энкодер)
+├── .env.pikabu.example         # Пример конфигурации для pikabu (классификатор)
+└── README.md                   # Этот файл
 ```
 
 ## Устранение неполадок
@@ -621,10 +767,10 @@ python -c "import torch; print(torch.version.cuda)"
 docker system prune -a
 
 # Проверка логов
-docker logs encoder_service_1
+docker logs tei_service_1
 
 # Проверка GPU в контейнере
-docker exec encoder_service_1 nvidia-smi
+docker exec tei_service_1 nvidia-smi
 ```
 
 ### Проблемы с памятью
@@ -643,31 +789,26 @@ echo "*.py text eol=lf" >> .gitattributes
 echo "dockerfile* text eol=lf" >> .gitattributes
 ```
 
-## Структура проекта
+## Требования к системе
 
-```
-encoder-service/
-├── encoder_service/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI приложение
-│   ├── worker.py            # ModelWorker
-│   └── dispatcher.py        # ResultDispatcher
-├── shared/
-│   ├── __init__.py
-│   ├── config.py            # Конфигурация
-│   ├── auth_service.py      # Аутентификация
-│   └── tei_models.py        # Pydantic модели
-├── models/                   # Кэш моделей
-├── logs/                     # Логи
-├── requirements.mps.txt      # Зависимости для Mac
-├── requirements.cuda.txt     # Зависимости для Docker
-├── dockerfile.base           # Базовый Docker образ
-├── dockerfile.service        # Docker образ сервиса
-├── docker-compose.yml        # Docker Compose
-├── procfile                  # Для запуска через honcho
-├── .env.example              # Пример общей конфигурации
-├── .env.frida.example        # Пример конфигурации для FRIDA
-└── README.md                 # Этот файл
+### Минимальные:
+- **CPU**: 2 cores, 4GB RAM
+- **GPU**: 4GB VRAM для моделей ~500MB
+
+### Рекомендуемые:
+- **CPU**: 4 cores, 8GB RAM
+- **GPU**: 8GB+ VRAM для больших батчей
+
+### Проверка GPU:
+```bash
+# Linux
+nvidia-smi
+
+# Docker
+docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
+
+# Python
+python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ## Лицензия
