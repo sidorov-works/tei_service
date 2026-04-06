@@ -74,7 +74,7 @@ source venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Для CUDA 12.1:
-pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Установка остальных зависимостей
 pip install -r requirements.cuda.txt
@@ -110,10 +110,10 @@ mkdir models logs
 
 # 2. Настройте .env файлы
 cp .env.example .env
-cp .env.encoder1.example .env.encoder1
-cp .env.encoder2.example .env.encoder2
+cp .env.frida.example .env.frida
+cp .env.pikabu.example .env.pikabu
 
-# 3. Отредактируйте .env.encoder1 и .env.encoder2:
+# 3. Отредактируйте .env.frida и .env.pikabu:
 #    SERVER_TYPE=encoder
 #    HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 #    MAX_MODEL_BATCH_SIZE=32
@@ -128,9 +128,6 @@ docker build -f dockerfile.base -t tei-base:latest .
 
 # 5. Запустите сервисы
 docker-compose up --build
-
-# 6. Проверка GPU (опционально)
-docker exec tei_service_1 nvidia-smi
 ```
 
 ### Проверка работоспособности
@@ -187,7 +184,7 @@ ENV PYTHONUNBUFFERED=1 \
 ```dockerfile
 FROM tei-base:latest
 
-RUN pip install --no-cache-dir torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
 
 COPY . .
 
@@ -203,23 +200,28 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ### docker-compose.yml
 
 ```yaml
+# docker-compose.yml
+
 services:
-  tei1:
+  # Первый экземпляр - энкодер (frida)
+  encoder_frida:
     build:
       context: .
       dockerfile: dockerfile.service
     ports:
       - "8260:8260"
     volumes:
+      # Общая папка для моделей
       - ./models:/app/models
-      - ./logs/tei1:/app/logs
+      # Отдельная папка для логов первого сервиса
+      - ./logs/encoder_frida:/app/logs
     env_file:
-      - .env
-      - .env.tei1
+      - .env          # параметры, общие для всех сервисов
+      - .env.frida    # специфические параметры первого сервиса
     environment:
       - PORT=8260
       - DOCKER_ENV=true
-    container_name: tei_service_1
+    container_name: encoder_frida
     restart: unless-stopped
     command: >
       uvicorn main:app
@@ -236,27 +238,29 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-  tei2:
+  # Второй экземпляр - классификатор (sismetanin toxic pikabu)
+  classifier_pikabu:
     build:
       context: .
       dockerfile: dockerfile.service
     ports:
-      - "8261:8261"
+      - "8265:8265"
     volumes:
+      # Общая папка для моделей
       - ./models:/app/models
-      - ./logs/tei2:/app/logs
+      # Отдельная папка для логов второго сервиса
+      - ./logs/classifier_pikabu:/app/logs
     env_file:
-      - .env
-      - .env.tei2
+      - .env          # параметры, общие для всех сервисов
+      - .env.pikabu # специфические параметры второго сервиса
     environment:
-      - PORT=8261
+      - PORT=8265
       - DOCKER_ENV=true
-    container_name: tei_service_2
+    container_name: classifier_pikabu
     restart: unless-stopped
     command: >
       uvicorn main:app
-      --port 8261 --host 0.0.0.0 --workers 1
+      --port 8265 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
@@ -341,6 +345,8 @@ wrapt==2.1.1
 ```
 
 ### requirements.cuda.txt (для Docker)
+
+ВНИМАНИЕ: torch не включается в requirements.cuda.txt, поскольку его установка прописана отдельно в dockerfile.
 
 ```txt
 annotated-doc==0.0.4

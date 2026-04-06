@@ -50,7 +50,7 @@ services:
       - ./logs/classifier_pikabu:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.encoder2 # специфические параметры второго сервиса
+      - .env.pikabu # специфические параметры второго сервиса
     environment:
       - PORT=8265
       - DOCKER_ENV=true
