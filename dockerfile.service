@@ -1,6 +1,6 @@
 # dockerfile.service
 
-FROM encoder-base:latest
+FROM tei-base:latest
 
 # Устанавливаем PyTorch с CUDA
 RUN pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
