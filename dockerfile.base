@@ -2,6 +2,7 @@
 
 FROM python:3.11-slim
 
+# Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y \
     curl \
     libopenblas-dev \
@@ -12,12 +13,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Копируем requirements для CUDA (без torch)
+# Копируем и устанавливаем Python зависимости
 COPY requirements.cuda.txt .
-
-# Устанавливаем зависимости (без torch)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.cuda.txt
+
+# Создаём пользователя с UID 1000 (как на хосте)
+# Это делаем в базовом образе, чтобы он был доступен во всех сервисах
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/models /app/logs && \
+    chown -R appuser:appuser /app
 
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \

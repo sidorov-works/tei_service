@@ -1,0 +1,75 @@
+# docker-compose.yml
+services:
+  # # Первый экземпляр - энкодер (frida)
+  # encoder_frida:
+  #   build:
+  #     context: .
+  #     dockerfile: dockerfile.service
+  #   ports:
+  #     - "8260:8260"
+  #   volumes:
+  #     # Общая папка для моделей
+  #     - ./models:/app/models
+  #     # Отдельная папка для логов первого сервиса
+  #     - ./logs/encoder_frida:/app/logs
+  #   env_file:
+  #     - .env          # параметры, общие для всех сервисов
+  #     - .env.frida    # специфические параметры первого сервиса
+  #   environment:
+  #     - PORT=8260
+  #     - DOCKER_ENV=true
+  #   # Запускаем от пользователя с UID 1000
+  #   user: "1000:1000"
+  #   container_name: encoder_frida
+  #   restart: unless-stopped
+  #   # Убрали создание папки из command - теперь это делается в Dockerfile
+  #   command: >
+  #     uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
+  #     --lifespan on --timeout-graceful-shutdown 15
+  #   init: true
+  #   shm_size: '2gb'
+  #   mem_limit: 8g
+  #   cpus: '4.0'
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+
+  # Второй экземпляр - классификатор (sismetanin toxic pikabu)
+  classifier_pikabu:
+    build:
+      context: .
+      dockerfile: dockerfile.service
+    ports:
+      - "8265:8265"
+    volumes:
+      # Общая папка для моделей
+      - ./models:/app/models
+      # Отдельная папка для логов второго сервиса
+      - ./logs/classifier_pikabu:/app/logs
+    env_file:
+      - .env          # параметры, общие для всех сервисов
+      - .env.pikabu   # специфические параметры второго сервиса
+    environment:
+      - PORT=8265
+      - DOCKER_ENV=true
+    user: "1000:1000"
+    container_name: classifier_pikabu
+    restart: unless-stopped
+    command: >
+      uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
+      --lifespan on --timeout-graceful-shutdown 15
+    init: true
+    shm_size: '2gb'
+    mem_limit: 8g
+    cpus: '4.0'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,5 +1,4 @@
 # docker-compose.yml
-
 services:
   # Первый экземпляр - энкодер (frida)
   encoder_frida:
@@ -19,11 +18,13 @@ services:
     environment:
       - PORT=8260
       - DOCKER_ENV=true
+    # Запускаем от пользователя с UID 1000
+    user: "1000:1000"
     container_name: encoder_frida
     restart: unless-stopped
+    # Убрали создание папки из command - теперь это делается в Dockerfile
     command: >
-      uvicorn main:app
-      --port 8260 --host 0.0.0.0 --workers 1
+      uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
@@ -36,6 +37,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
   # Второй экземпляр - классификатор (sismetanin toxic pikabu)
   classifier_pikabu:
     build:
@@ -50,15 +52,15 @@ services:
       - ./logs/classifier_pikabu:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.pikabu # специфические параметры второго сервиса
+      - .env.pikabu   # специфические параметры второго сервиса
     environment:
       - PORT=8265
       - DOCKER_ENV=true
+    user: "1000:1000"
     container_name: classifier_pikabu
     restart: unless-stopped
     command: >
-      uvicorn main:app
-      --port 8265 --host 0.0.0.0 --workers 1
+      uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'

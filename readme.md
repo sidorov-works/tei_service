@@ -12,7 +12,8 @@ TEI-совместимый сервис для векторизации текс
 - **Асинхронная архитектура** — очереди задач сглаживают пиковую нагрузку
 - **Мультиплатформенность** — поддержка CPU, NVIDIA GPU (CUDA), Apple Silicon (MPS)
 - **Расширенная валидация** — защита от перегрузки на уровне эндпоинтов
-- **Docker-ready** — готовые образы для Linux и Windows с GPU поддержкой
+- **Docker-ready** — готовые образы для Linux с GPU поддержкой
+- **Безопасность** — запуск от непривилегированного пользователя с UID 1000
 
 ## Быстрый старт
 
@@ -105,8 +106,10 @@ uvicorn main:app --port 8262 --workers 1
 ### Подготовка
 
 ```bash
-# 1. Создайте необходимые папки
-mkdir models logs
+# 1. Создайте необходимые папки с правильными правами
+mkdir -p models/transformers logs/encoder_frida logs/classifier_pikabu
+sudo chown 1000:1000 models/ -R
+sudo chown 1000:1000 logs/ -R
 
 # 2. Настройте .env файлы
 cp .env.example .env
@@ -156,9 +159,12 @@ curl -X POST http://localhost:8260/predict \
 
 ### dockerfile.base
 
+Базовый образ, содержащий общие зависимости и создающий пользователя для всех сервисов.
+
 ```dockerfile
 FROM python:3.11-slim
 
+# Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y \
     curl \
     libopenblas-dev \
@@ -169,10 +175,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Копируем и устанавливаем Python зависимости
 COPY requirements.cuda.txt .
-
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.cuda.txt
+
+# Создаём пользователя с UID 1000 (как на хосте)
+# Это делаем в базовом образе, чтобы он был доступен во всех сервисах
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/models /app/logs && \
+    chown -R appuser:appuser /app
 
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
@@ -181,16 +193,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 ### dockerfile.service
 
+Сервисный образ, наследующий базовый и добавляющий специфичные для сервиса компоненты.
+
 ```dockerfile
 FROM tei-base:latest
 
-RUN pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+# Устанавливаем PyTorch с CUDA
+RUN pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 
+# Копируем код приложения
 COPY . .
 
-RUN mkdir -p logs models && \
-    useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# Меняем владельца на appuser для всех файлов
+RUN chown -R appuser:appuser /app
 
+# Переключаемся на непривилегированного пользователя
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
@@ -200,8 +217,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ### docker-compose.yml
 
 ```yaml
-# docker-compose.yml
-
 services:
   # Первый экземпляр - энкодер (frida)
   encoder_frida:
@@ -221,11 +236,12 @@ services:
     environment:
       - PORT=8260
       - DOCKER_ENV=true
+    # Запускаем от пользователя с UID 1000
+    user: "1000:1000"
     container_name: encoder_frida
     restart: unless-stopped
     command: >
-      uvicorn main:app
-      --port 8260 --host 0.0.0.0 --workers 1
+      uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
@@ -238,6 +254,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
   # Второй экземпляр - классификатор (sismetanin toxic pikabu)
   classifier_pikabu:
     build:
@@ -252,15 +269,15 @@ services:
       - ./logs/classifier_pikabu:/app/logs
     env_file:
       - .env          # параметры, общие для всех сервисов
-      - .env.pikabu # специфические параметры второго сервиса
+      - .env.pikabu   # специфические параметры второго сервиса
     environment:
       - PORT=8265
       - DOCKER_ENV=true
+    user: "1000:1000"
     container_name: classifier_pikabu
     restart: unless-stopped
     command: >
-      uvicorn main:app
-      --port 8265 --host 0.0.0.0 --workers 1
+      uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
       --lifespan on --timeout-graceful-shutdown 15
     init: true
     shm_size: '2gb'
@@ -274,6 +291,18 @@ services:
               count: all
               capabilities: [gpu]
 ```
+
+### Зачем два Dockerfile?
+
+**dockerfile.base** — «фундамент»:
+- Содержит всё, что одинаково для всех сервисов
+- Собирается редко (при изменении Python или общих зависимостей)
+- Экономит время и место
+
+**dockerfile.service** — «надстройка»:
+- Содержит специфику конкретного сервиса
+- Собирается часто (при изменении кода)
+- Наследует базовый образ
 
 ## Файлы зависимостей
 
@@ -346,7 +375,7 @@ wrapt==2.1.1
 
 ### requirements.cuda.txt (для Docker)
 
-ВНИМАНИЕ: torch не включается в requirements.cuda.txt, поскольку его установка прописана отдельно в dockerfile.
+**ВНИМАНИЕ:** torch не включается в requirements.cuda.txt, поскольку его установка прописана отдельно в dockerfile для гибкости выбора версии CUDA.
 
 ```txt
 annotated-doc==0.0.4
@@ -582,6 +611,9 @@ tei: uvicorn main:app --port ${TEI_SERVICE_PORT} --workers 1 --lifespan on --tim
 | `RATE_LIMIT_EMBED` | Лимит запросов к /embed | `200/minute` |
 | `RATE_LIMIT_TOKENIZE` | Лимит запросов к /tokenize | `600/minute` |
 | `RATE_LIMIT_PREDICT` | Лимит запросов к /predict | `200/minute` |
+| **Аутентификация** | | |
+| `INTERNAL_API_SECRET` | Секретный ключ для Bearer аутентификации | (не задан) |
+| `REQUIRE_AUTH` | Требовать аутентификацию | `false` |
 
 ### Пример .env файла (общий)
 
@@ -708,11 +740,11 @@ curl -X POST http://localhost:8262/embed \
   -d '{"inputs": "test"}'
 ```
 
-Для отключения аутентификации не задавайте `INTERNAL_API_SECRET`.
+Для отключения аутентификации установите `REQUIRE_AUTH=false` или не задавайте `INTERNAL_API_SECRET`.
 
 ## Мониторинг и логи
 
-- Логи сохраняются в `logs/tei_service/app.log`
+- Логи сохраняются в `logs/tei_service/app.log` (или в папке для конкретного сервиса при Docker)
 - Уровень логирования настраивается через `LOGGING_LEVEL`
 - Health check эндпоинт доступен для систем мониторинга
 
@@ -733,10 +765,10 @@ tei-service/
 │   ├── auth_service.py         # Аутентификация
 │   ├── task.py                 # Task, TaskType, TaskResult
 │   └── tei_models.py           # Pydantic модели
-├── models/                     # Кэш моделей
+├── models/                     # Кэш моделей (монтируется в Docker)
 │   ├── sentence-transformers/  # Для энкодера
 │   └── transformers/           # Для классификатора
-├── logs/                       # Логи
+├── logs/                       # Логи (монтируется в Docker)
 ├── requirements.mps.txt        # Зависимости для Mac
 ├── requirements.cuda.txt       # Зависимости для Docker
 ├── dockerfile.base             # Базовый Docker образ
@@ -767,16 +799,25 @@ nvcc --version
 python -c "import torch; print(torch.version.cuda)"
 ```
 
+### Проблемы с правами в Docker (WSL/Linux)
+```bash
+# Создать папки с правильным владельцем
+mkdir -p models/transformers logs/encoder_frida logs/classifier_pikabu
+sudo chown 1000:1000 models/ -R
+sudo chown 1000:1000 logs/ -R
+```
+
 ### Docker проблемы
 ```bash
 # Очистка кэша
 docker system prune -a
 
 # Проверка логов
-docker logs tei_service_1
+docker logs encoder_frida
+docker logs classifier_pikabu
 
 # Проверка GPU в контейнере
-docker exec tei_service_1 nvidia-smi
+docker exec encoder_frida nvidia-smi
 ```
 
 ### Проблемы с памятью
