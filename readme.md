@@ -1,91 +1,54 @@
 # TEI Service
 
-TEI-совместимый сервис для векторизации текста и классификации. Поддерживает два режима работы:
+TEI-совместимый сервис для векторизации текста и классификации.
+
+Поддерживает два режима:
 - **Encoder** — эмбеддинги текста через Sentence Transformers
 - **Classifier** — классификация текста через sequence classification модели
 
-## Особенности
-
-- **TEI-совместимость** — эндпоинты `/embed`, `/tokenize`, `/predict`, `/info`, `/health` соответствуют спецификации Hugging Face TEI
-- **Два режима работы** — один сервис может работать как энкодер или как классификатор (выбирается через `SERVER_TYPE`)
-- **Потокобезопасность** — единственный воркер гарантирует корректную работу с не-thread-safe моделями
-- **Асинхронная архитектура** — очереди задач сглаживают пиковую нагрузку
-- **Мультиплатформенность** — поддержка CPU, NVIDIA GPU (CUDA), Apple Silicon (MPS)
-- **Расширенная валидация** — защита от перегрузки на уровне эндпоинтов
-- **Docker-ready** — готовые образы для Linux с GPU поддержкой
-- **Безопасность** — запуск от непривилегированного пользователя с UID 1000
-
 ## Быстрый старт
 
-### Режим энкодера (Mac с Metal)
+### Локальный запуск (Mac с Metal)
 
 ```bash
-# Клонирование
 git clone <repository-url>
 cd tei-service
 
-# Создание виртуального окружения
 python -m venv venv
 source venv/bin/activate
 
-# Установка зависимостей
 pip install -r requirements.mps.txt
 
-# Настройка окружения для энкодера
 cp .env.frida.example .env.frida
 # Отредактируйте .env.frida:
 # SERVER_TYPE=encoder
 # DEVICE=mps
 # HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
 
-# Запуск через honcho (рекомендуется)
 honcho start -f procfile -e .env.frida
-
-# Или напрямую uvicorn
-uvicorn main:app --port 8262 --workers 1
 ```
 
-### Режим классификатора (Mac с Metal)
+### Локальный запуск (Linux)
 
 ```bash
-# Настройка окружения для классификатора
-cp .env.pikabu.example .env.pikabu
-# Отредактируйте .env.pikabu:
-# SERVER_TYPE=classifier
-# DEVICE=mps
-# HUGGING_FACE_MODEL_NAME=sismetanin/rubert-toxic-pikabu-2ch
-
-# Запуск
-honcho start -f procfile -e .env.pikabu
-```
-
-### Локальный запуск (Linux с CPU/GPU)
-
-```bash
-# Установка системных зависимостей
 sudo apt-get update
 sudo apt-get install -y python3-pip python3-venv git
 
-# Создание и активация venv
 python3 -m venv venv
 source venv/bin/activate
 
-# Установка PyTorch (выберите нужную версию)
 # Для CPU:
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Для CUDA 12.1:
 pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
 
-# Установка остальных зависимостей
 pip install -r requirements.cuda.txt
 
-# Настройка .env
 cp .env.example .env
-# Укажите SERVER_TYPE=encoder или SERVER_TYPE=classifier
-# Укажите DEVICE=cuda или DEVICE=cpu
+# Укажите SERVER_TYPE=encoder или classifier
+# Укажите DEVICE=cuda или cpu
 
-# Запуск
 uvicorn main:app --port 8262 --workers 1
 ```
 
@@ -93,78 +56,49 @@ uvicorn main:app --port 8262 --workers 1
 
 ### Требования
 
-**Для Linux:**
-- Docker Engine
+- Docker
 - NVIDIA Container Toolkit (для GPU)
-- NVIDIA драйверы (для GPU)
-
-**Для Windows:**
-- Docker Desktop с WSL2 backend
-- NVIDIA Container Toolkit
-- NVIDIA драйверы
-
-### Подготовка
-
-```bash
-# 1. Создайте необходимые папки с правильными правами
-mkdir -p models/transformers logs/encoder_frida logs/classifier_pikabu
-sudo chown 1000:1000 models/ -R
-sudo chown 1000:1000 logs/ -R
-
-# 2. Настройте .env файлы
-cp .env.example .env
-cp .env.frida.example .env.frida
-cp .env.pikabu.example .env.pikabu
-
-# 3. Отредактируйте .env.frida и .env.pikabu:
-#    SERVER_TYPE=encoder
-#    HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
-#    MAX_MODEL_BATCH_SIZE=32
-#    DEVICE=cuda
-```
 
 ### Сборка и запуск
 
 ```bash
-# 4. Соберите базовый образ
+# Сборка базового образа (один раз, тяжело)
 docker build -f dockerfile.base -t tei-base:latest .
 
-# 5. Запустите сервисы
-docker-compose up --build
+# Запуск сервисов
+docker compose up -d
+
+# Проверка
+curl http://localhost:8260/health
+curl http://localhost:8265/health
 ```
 
-### Проверка работоспособности
+### Остановка
 
 ```bash
-# Health check
-curl http://localhost:8260/health
+docker compose down
+```
 
-# Информация о модели
-curl http://localhost:8260/info
+### Полная очистка (удаление моделей и логов)
 
-# Получение эмбеддинга (только в режиме энкодера)
-curl -X POST http://localhost:8260/embed \
-  -H "Authorization: Bearer your_secret_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": "Привет, мир!"}'
-
-# Классификация текста (только в режиме классификатора)
-curl -X POST http://localhost:8260/predict \
-  -H "Authorization: Bearer your_secret_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": "Ты идиот!"}'
+```bash
+docker compose down -v
 ```
 
 ## Docker файлы
 
 ### dockerfile.base
 
-Базовый образ, содержащий общие зависимости и создающий пользователя для всех сервисов.
+Базовый образ с зависимостями. Собирается редко.
 
 ```dockerfile
+# Базовый образ с Python 3.11
 FROM python:3.11-slim
 
-# Устанавливаем системные зависимости
+# ============================================
+# 1. СИСТЕМНЫЕ ЗАВИСИМОСТИ
+# ============================================
+
 RUN apt-get update && apt-get install -y \
     curl \
     libopenblas-dev \
@@ -175,16 +109,28 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Копируем и устанавливаем Python зависимости
-COPY requirements.cuda.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.cuda.txt
+# ============================================
+# 2. PYTHON ЗАВИСИМОСТИ (ВКЛЮЧАЯ TORCH)
+# ============================================
 
-# Создаём пользователя с UID 1000 (как на хосте)
-# Это делаем в базовом образе, чтобы он был доступен во всех сервисах
+COPY requirements.cuda.txt .
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.cuda.txt && \
+    pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+
+# ============================================
+# 3. ПОЛЬЗОВАТЕЛЬ И ПРАВА
+# ============================================
+
 RUN useradd -m -u 1000 appuser && \
     mkdir -p /app/models /app/logs && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app && \
+    chmod 755 /app/models /app/logs
+
+# ============================================
+# 4. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+# ============================================
 
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
@@ -193,22 +139,33 @@ ENV PYTHONUNBUFFERED=1 \
 
 ### dockerfile.service
 
-Сервисный образ, наследующий базовый и добавляющий специфичные для сервиса компоненты.
+Сервисный образ с кодом. Собирается часто.
 
 ```dockerfile
+# Наследуемся от базового образа, где уже установлены все зависимости
 FROM tei-base:latest
 
-# Устанавливаем PyTorch с CUDA
-RUN pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+# ============================================
+# 1. КОПИРОВАНИЕ КОДА ПРИЛОЖЕНИЯ
+# ============================================
 
-# Копируем код приложения
 COPY . .
 
-# Меняем владельца на appuser для всех файлов
+# ============================================
+# 2. ПРАВА НА ФАЙЛЫ
+# ============================================
+
 RUN chown -R appuser:appuser /app
 
-# Переключаемся на непривилегированного пользователя
+# ============================================
+# 3. ПЕРЕКЛЮЧЕНИЕ НА ПОЛЬЗОВАТЕЛЯ
+# ============================================
+
 USER appuser
+
+# ============================================
+# 4. HEALTHCHECK
+# ============================================
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://127.0.0.1:${PORT:-8260}/health || exit 1
@@ -218,7 +175,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 ```yaml
 services:
-  # Первый экземпляр - энкодер (frida)
   encoder_frida:
     build:
       context: .
@@ -226,23 +182,18 @@ services:
     ports:
       - "8260:8260"
     volumes:
-      # Общая папка для моделей
-      - ./models:/app/models
-      # Отдельная папка для логов первого сервиса
-      - ./logs/encoder_frida:/app/logs
+      - model_cache:/app/models
+      - logs_encoder:/app/logs
     env_file:
-      - .env          # параметры, общие для всех сервисов
-      - .env.frida    # специфические параметры первого сервиса
+      - .env
+      - .env.frida
     environment:
       - PORT=8260
       - DOCKER_ENV=true
-    # Запускаем от пользователя с UID 1000
     user: "1000:1000"
     container_name: encoder_frida
     restart: unless-stopped
-    command: >
-      uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
-      --lifespan on --timeout-graceful-shutdown 15
+    command: uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
     init: true
     shm_size: '2gb'
     mem_limit: 8g
@@ -255,7 +206,6 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Второй экземпляр - классификатор (sismetanin toxic pikabu)
   classifier_pikabu:
     build:
       context: .
@@ -263,22 +213,18 @@ services:
     ports:
       - "8265:8265"
     volumes:
-      # Общая папка для моделей
-      - ./models:/app/models
-      # Отдельная папка для логов второго сервиса
-      - ./logs/classifier_pikabu:/app/logs
+      - model_cache:/app/models
+      - logs_classifier:/app/logs
     env_file:
-      - .env          # параметры, общие для всех сервисов
-      - .env.pikabu   # специфические параметры второго сервиса
+      - .env
+      - .env.pikabu
     environment:
       - PORT=8265
       - DOCKER_ENV=true
     user: "1000:1000"
     container_name: classifier_pikabu
     restart: unless-stopped
-    command: >
-      uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
-      --lifespan on --timeout-graceful-shutdown 15
+    command: uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
     init: true
     shm_size: '2gb'
     mem_limit: 8g
@@ -290,204 +236,41 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-```
 
-### Зачем два Dockerfile?
-
-**dockerfile.base** — «фундамент»:
-- Содержит всё, что одинаково для всех сервисов
-- Собирается редко (при изменении Python или общих зависимостей)
-- Экономит время и место
-
-**dockerfile.service** — «надстройка»:
-- Содержит специфику конкретного сервиса
-- Собирается часто (при изменении кода)
-- Наследует базовый образ
-
-## Файлы зависимостей
-
-### requirements.mps.txt (для Mac)
-
-```txt
-annotated-doc==0.0.4
-annotated-types==0.7.0
-anyio==4.12.0
-certifi==2025.11.12
-cffi==2.0.0
-charset-normalizer==3.4.4
-click==8.3.1
-concurrent-log-handler==0.9.28
-cryptography==46.0.5
-Deprecated==1.3.1
-dotenv==0.9.9
-ecdsa==0.19.1
-fastapi==0.128.0
-filelock==3.20.1
-fsspec==2025.12.0
-h11==0.16.0
-hf-xet==1.2.0
-honcho==2.0.0
-huggingface-hub==0.36.0
-idna==3.11
-Jinja2==3.1.6
-joblib==1.5.3
-limits==5.8.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-numpy==2.4.0
-packaging==25.0
-portalocker==3.2.0
-pyasn1==0.6.2
-pycparser==3.0
-pydantic==2.12.5
-pydantic_core==2.41.5
-pygelf==4.0.3
-python-dotenv==1.2.1
-python-jose==3.5.0
-python-json-logger==4.0.0
-PyYAML==6.0.3
-regex==2025.11.3
-requests==2.32.5
-rsa==4.9.1
-safetensors==0.7.0
-scikit-learn==1.8.0
-scipy==1.16.3
-sentence-transformers==5.2.0
-setproctitle==1.3.7
-six==1.17.0
-slowapi==0.1.9
-starlette==0.50.0
-sympy==1.14.0
-threadpoolctl==3.6.0
-tokenizers==0.22.1
-torch==2.9.1
-tqdm==4.67.1
-transformers==4.57.3
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-urllib3==2.6.2
-uvicorn==0.40.0
-uvloop==0.22.1
-wrapt==2.1.1
-```
-
-### requirements.cuda.txt (для Docker)
-
-**ВНИМАНИЕ:** torch не включается в requirements.cuda.txt, поскольку его установка прописана отдельно в dockerfile для гибкости выбора версии CUDA.
-
-```txt
-annotated-doc==0.0.4
-annotated-types==0.7.0
-anyio==4.12.0
-certifi==2025.11.12
-charset-normalizer==3.4.4
-click==8.3.1
-concurrent-log-handler==0.9.28
-dotenv==0.9.9
-fastapi==0.128.0
-filelock==3.20.1
-fsspec==2025.12.0
-h11==0.16.0
-hf-xet==1.2.0
-huggingface-hub==0.36.0
-idna==3.11
-Jinja2==3.1.6
-joblib==1.5.3
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-numpy==2.4.0
-packaging==25.0
-portalocker==3.2.0
-pydantic==2.12.5
-pydantic_core==2.41.5
-pygelf==4.0.3
-python-dotenv==1.2.1
-python-jose==3.5.0
-python-json-logger==4.0.0
-PyYAML==6.0.3
-regex==2025.11.3
-requests==2.32.5
-safetensors==0.7.0
-scikit-learn==1.8.0
-scipy==1.16.3
-sentence-transformers==5.2.0
-setproctitle==1.3.7
-slowapi==0.1.9
-starlette==0.50.0
-sympy==1.14.0
-threadpoolctl==3.6.0
-tokenizers==0.22.1
-tqdm==4.67.1
-transformers==4.57.3
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-urllib3==2.6.2
-uvicorn==0.40.0
-logger-utils @ git+https://github.com/sidorov-works/logger_utils@v0.4.0
-```
-
-## Procfile (для локального запуска)
-
-```
-tei: uvicorn main:app --port ${TEI_SERVICE_PORT} --workers 1 --lifespan on --timeout-graceful-shutdown 10
+volumes:
+  model_cache:
+    name: tei_model_cache
+  logs_encoder:
+    name: tei_logs_encoder
+  logs_classifier:
+    name: tei_logs_classifier
 ```
 
 ## Эндпоинты
 
-### `GET /info`
+### GET /health
 
-Информация о загруженной модели. Доступен в обоих режимах.
+Проверка здоровья сервиса.
 
-**Response для энкодера:**
-```json
-{
-  "model_id": "ai-forever/FRIDA",
-  "max_input_length": 512,
-  "max_client_batch_size": 128,
-  "prompts": [
-    {"name": "query", "text": "search_query: "},
-    {"name": "document", "text": "search_document: "}
-  ]
-}
-```
+- `200 OK` — сервис готов
+- `503 Service Unavailable` — сервис не готов
 
-**Response для классификатора:**
-```json
-{
-  "model_id": "sismetanin/rubert-toxic-pikabu-2ch",
-  "max_input_length": 512,
-  "max_client_batch_size": 128,
-  "prompts": []
-}
-```
+### GET /info
 
-### `GET /health`
+Информация о загруженной модели.
 
-Проверка здоровья сервиса. Доступен в обоих режимах.
-
-- `200 OK` — сервис готов принимать запросы
-- `503 Service Unavailable` — сервис не готов (модель не загружена, очереди переполнены)
-
-### `POST /embed` (только в режиме энкодера)
+### POST /embed (только в режиме энкодера)
 
 Получение эмбеддингов текста.
 
 **Request**
 ```json
 {
-  "inputs": ["текст1", "текст2"],
-  "prompt_name": null,
-  "normalize": false,
-  "truncate": true,
-  "truncation_direction": "right"
+  "inputs": ["текст1", "текст2"]
 }
 ```
 
-**Response** — всегда массив массивов float
-
+**Response**
 ```json
 [
   [0.123, -0.456, 0.789, ...],
@@ -495,367 +278,66 @@ tei: uvicorn main:app --port ${TEI_SERVICE_PORT} --workers 1 --lifespan on --tim
 ]
 ```
 
-### `POST /tokenize` (только в режиме энкодера)
-
-Токенизация текста.
-
-**Request**
-```json
-{
-  "inputs": ["текст1", "текст2"],
-  "add_special_tokens": true,
-  "truncate": true
-}
-```
-
-**Response** — всегда массив массивов объектов TokenInfo
-
-```json
-[
-  [
-    {
-      "id": 2,
-      "text": "▁Привет",
-      "special": false,
-      "start": 0,
-      "stop": 6
-    },
-    {
-      "id": 6,
-      "text": ",",
-      "special": false,
-      "start": 6,
-      "stop": 7
-    }
-  ]
-]
-```
-
-#### Режимы токенизации
-
-Режим задается переменной окружения `TOKENIZE_MODE`:
-
-- **`full`** (по умолчанию) — возвращает полную информацию о токенах (id, текст, флаг special, позиции в тексте)
-- **`lite`** — возвращает только id токенов, остальные поля пустые (быстрее, меньше трафик)
-
-### `POST /predict` (только в режиме классификатора)
+### POST /predict (только в режиме классификатора)
 
 Классификация текста.
 
 **Request**
 ```json
 {
-  "inputs": ["текст1", "текст2"],
-  "raw_scores": false,
-  "truncate": true
+  "inputs": ["текст1", "текст2"]
 }
 ```
 
-**Response** — для одиночного текста возвращает массив объектов, для батча — массив массивов
-
+**Response**
 ```json
-// Одиночный текст
 [
-  {"label": "toxic", "score": 0.98},
-  {"label": "non-toxic", "score": 0.02}
-]
-
-// Батч
-[
-  [
-    {"label": "toxic", "score": 0.98},
-    {"label": "non-toxic", "score": 0.02}
-  ],
-  [
-    {"label": "toxic", "score": 0.01},
-    {"label": "non-toxic", "score": 0.99}
-  ]
+  [{"label": "toxic", "score": 0.98}],
+  [{"label": "toxic", "score": 0.01}]
 ]
 ```
 
-## Конфигурация
+## Переменные окружения
 
-### Переменные окружения
-
-| Переменная | Описание | Значение по умолчанию |
-|------------|----------|---------------------|
-| **Режим работы** | | |
-| `SERVER_TYPE` | Тип сервиса (`encoder` или `classifier`) | `encoder` |
-| **Основные** | | |
-| `HUGGING_FACE_MODEL_NAME` | Имя модели на Hugging Face Hub | `ai-forever/FRIDA` |
-| `DEVICE` | Устройство (`cpu`, `cuda`, `mps`) | `cpu` |
-| `SERVER_NAME` | Имя экземпляра сервиса | `tei` |
-| `TEI_SERVICE_PORT` | Порт для запуска (используется в Procfile) | `8262` |
-| **Размеры батчей** | | |
-| `MAX_MODEL_BATCH_SIZE` | Размер батча для модели (GPU memory) | `32` |
-| `MAX_SERVICE_BATCH_SIZE` | Макс. размер батча для эндпоинта | `128` |
-| **Ограничения текста** | | |
-| `MAX_TEXT_LENGTH` | Макс. длина одного текста (символы) | `10000` |
-| `MAX_TOTAL_BATCH_LENGTH` | Макс. суммарная длина текстов в батче | `500000` |
-| **Таймауты** | | |
-| `EMBED_TIMEOUT` | Таймаут операции /embed (сек) | `30.0` |
-| `TOKENIZE_TIMEOUT` | Таймаут операции /tokenize (сек) | `5.0` |
-| `PREDICT_TIMEOUT` | Таймаут операции /predict (сек) | `30.0` |
-| **Очереди** | | |
-| `INPUT_QUEUE_MAXSIZE` | Макс. размер входящей очереди | `1000` |
-| `OUTPUT_QUEUE_MAXSIZE` | Макс. размер исходящей очереди | `1000` |
-| **Токенизация** | | |
-| `TOKENIZE_MODE` | Режим токенизации (`full` / `lite`) | `full` |
-| **Обработка NaN** | | |
-| `EMBEDDING_CLEAN_NAN` | Заменять NaN/Inf в эмбеддингах | `true` |
-| `EMBEDDING_NAN_REPLACEMENT` | Значение для замены NaN/Inf | `0.0` |
-| `EMBEDDING_LOG_NAN` | Логировать факт замены NaN/Inf | `true` |
-| **Rate limiting** | | |
-| `RATE_LIMIT_INFO` | Лимит запросов к /info | `500/minute` |
-| `RATE_LIMIT_HEALTH` | Лимит запросов к /health | `500/minute` |
-| `RATE_LIMIT_EMBED` | Лимит запросов к /embed | `200/minute` |
-| `RATE_LIMIT_TOKENIZE` | Лимит запросов к /tokenize | `600/minute` |
-| `RATE_LIMIT_PREDICT` | Лимит запросов к /predict | `200/minute` |
-| **Аутентификация** | | |
-| `INTERNAL_API_SECRET` | Секретный ключ для Bearer аутентификации | (не задан) |
-| `REQUIRE_AUTH` | Требовать аутентификацию | `false` |
-
-### Пример .env файла (общий)
-
-```bash
-# .env
-
-# --- Безопасность и аутентификация ---
-
-INTERNAL_API_SECRET=your_extremely_safety_internal_api_secret
-REQUIRE_AUTH=false
-
-# --- Логирование ---
-
-LOG_PATH=logs
-LOGGING_LEVEL=INFO
-LOG_FORMAT="%(asctime)s | %(name)-24s | %(levelname)-8s | %(message)s"
-DOCKER_ENV=false
-
-# --- Ограничения длин очередей ---
-
-OUTPUT_QUEUE_MAXSIZE=1000
-INPUT_QUEUE_MAXSIZE=1000
-
-# --- Обработка NaN/Inf в эмбеддингах ---
-EMBEDDING_CLEAN_NAN=true           # Заменять ли NaN/Inf
-EMBEDDING_NAN_REPLACEMENT=0.0      # На что заменять
-EMBEDDING_LOG_NAN=true             # Логировать ли факт замены
-
-
-# --- Лимиты на входящие запросы ---
-# При превышении лимитов сервис должен вызвать ValidationError
-
-# Максимально допустимое ДЛЯ СЕРВИСА кол-во текстов в батче. 
-# Этот параметр не имеет отношения к модели. 
-# Воркеры сервиса разбивают батч на подбатчи, подходящие для конкретной модели.
-# А данный параметр является именно предварительным ограничением самого сервиса, 
-# чтобы не произошел коллапс ресурсов.
-MAX_SERVICE_BATCH_SIZE=128 
-
-# Максимально допустимая длина одного текста в запросе. 
-# Этот параметр не связан напрямую со свойством max_seq_len конкретной эмбеддинговой модели 
-# Это просто подстраховка, чтобы не "забить" сервис заведомо огромными запросами
-MAX_TEXT_LENGTH=10000
-
-# Максимально допустимая суммарная длина текстов в батче
-MAX_TOTAL_BATCH_LENGTH=500000
-
-
-# --- Rate limiting и защита от Ddos ---
-
-RATE_LIMIT_INFO=500/minute
-RATE_LIMIT_HEALTH=500/minute
-RATE_LIMIT_EMBED=200/minute              
-RATE_LIMIT_TOKENIZE=600/minute
-RATE_LIMIT_PREDICT=200/minute
-```
-
-### Пример .env.frida (для энкодера)
-
-```bash
-# .env.frida.example
-
-SERVER_NAME=frida
-SERVER_TYPE=encoder
-
-SERVER_PORT=8260 # в коде не используется, нужно только для запуска с procfile
-
-DEVICE=mps
-
-HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
-MAX_MODEL_BATCH_SIZE=32
-
-# Режим применения эндпойнта /tokenize:
-# Оригинальный TEI возвращает полную информацию о токенах. 
-# Это не всегда и не всем требуется. Например, для основного применения - подсчета 
-# длины текста в токенах - достаточно только определить длину списков с информацией о токенах, 
-# а сама информация не нужна. Поэтому предусматриваем режим "lite", 
-# в котором информация по токенам будет содержать типовые плейсхолдеры
-TOKENIZE_MODE=lite # или full
-
-# Тайм-ауты: максимальное время выполнения операции (от входа в эндпоинт до возврата результата)
-EMBED_TIMEOUT=30.0
-TOKENIZE_TIMEOUT=15.0
-```
-
-### Пример .env.pikabu (для классификатора)
-
-```bash
-# .env.pikabu.example
-
-SERVER_NAME=pikabu
-SERVER_TYPE=classifier
-
-SERVER_PORT=8265 # в коде не используется, нужно только для запуска с procfile
-
-DEVICE=mps
-
-HUGGING_FACE_MODEL_NAME=sismetanin/rubert-toxic-pikabu-2ch
-MAX_MODEL_BATCH_SIZE=32
-
-# Тайм-ауты: максимальное время выполнения операции (от входа в эндпоинт до возврата результата)
-PREDICT_TIMEOUT=30.0
-```
-
-### Пример .env.tei1 (для Docker)
-
-```bash
-# .env.tei1
-SERVER_NAME=frida
-SERVER_TYPE=encoder
-HUGGING_FACE_MODEL_NAME=ai-forever/FRIDA
-DEVICE=cuda
-MAX_MODEL_BATCH_SIZE=32
-```
-
-## Аутентификация
-
-Для защиты внутренних эндпоинтов используется Bearer token:
-
-```bash
-curl -X POST http://localhost:8262/embed \
-  -H "Authorization: Bearer your_secret_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{"inputs": "test"}'
-```
-
-Для отключения аутентификации установите `REQUIRE_AUTH=false` или не задавайте `INTERNAL_API_SECRET`.
-
-## Мониторинг и логи
-
-- Логи сохраняются в `logs/tei_service/app.log` (или в папке для конкретного сервиса при Docker)
-- Уровень логирования настраивается через `LOGGING_LEVEL`
-- Health check эндпоинт доступен для систем мониторинга
-
-## Структура проекта
-
-```
-tei-service/
-├── main.py                     # FastAPI приложение
-├── dispatcher.py               # ResultDispatcher
-├── workers/
-│   ├── __init__.py
-│   ├── base_worker.py          # BaseWorker (абстрактный)
-│   ├── encoder_worker.py       # EncoderWorker
-│   └── classifier_worker.py    # ClassifierWorker
-├── shared/
-│   ├── __init__.py
-│   ├── config.py               # Конфигурация
-│   ├── auth_service.py         # Аутентификация
-│   ├── task.py                 # Task, TaskType, TaskResult
-│   └── tei_models.py           # Pydantic модели
-├── models/                     # Кэш моделей (монтируется в Docker)
-│   ├── sentence-transformers/  # Для энкодера
-│   └── transformers/           # Для классификатора
-├── logs/                       # Логи (монтируется в Docker)
-├── requirements.mps.txt        # Зависимости для Mac
-├── requirements.cuda.txt       # Зависимости для Docker
-├── dockerfile.base             # Базовый Docker образ
-├── dockerfile.service          # Docker образ сервиса
-├── docker-compose.yml          # Docker Compose
-├── procfile                    # Для запуска через honcho
-├── .env.example                # Пример общей конфигурации
-├── .env.frida.example          # Пример конфигурации для FRIDA (энкодер)
-├── .env.pikabu.example         # Пример конфигурации для pikabu (классификатор)
-└── README.md                   # Этот файл
-```
+| Переменная | Описание | По умолчанию |
+|------------|----------|--------------|
+| SERVER_TYPE | encoder или classifier | encoder |
+| HUGGING_FACE_MODEL_NAME | Имя модели | ai-forever/FRIDA |
+| DEVICE | cpu, cuda, mps | cpu |
+| MAX_MODEL_BATCH_SIZE | Размер батча | 32 |
+| MAX_SERVICE_BATCH_SIZE | Макс. размер батча для эндпоинта | 128 |
+| MAX_TEXT_LENGTH | Макс. длина одного текста | 10000 |
+| MAX_TOTAL_BATCH_LENGTH | Макс. суммарная длина текстов в батче | 500000 |
+| INTERNAL_API_SECRET | Ключ аутентификации | не задан |
+| REQUIRE_AUTH | Требовать аутентификацию | false |
 
 ## Устранение неполадок
 
-### Проблемы с MPS (Mac)
+### Просмотр логов
+
 ```bash
-# Убедитесь, что PyTorch версии 2.0+
-pip install torch>=2.0.0
-# Проверка
-python -c "import torch; print(torch.backends.mps.is_available())"
+docker compose logs -f
+docker compose logs -f encoder_frida
+docker compose logs -f classifier_pikabu
 ```
 
-### Проблемы с CUDA (Linux/Windows)
+### Проверка GPU
+
 ```bash
-# Проверка версии CUDA
-nvcc --version
-# Проверка PyTorch CUDA
-python -c "import torch; print(torch.version.cuda)"
-```
-
-### Проблемы с правами в Docker (WSL/Linux)
-```bash
-# Создать папки с правильным владельцем
-mkdir -p models/transformers logs/encoder_frida logs/classifier_pikabu
-sudo chown 1000:1000 models/ -R
-sudo chown 1000:1000 logs/ -R
-```
-
-### Docker проблемы
-```bash
-# Очистка кэша
-docker system prune -a
-
-# Проверка логов
-docker logs encoder_frida
-docker logs classifier_pikabu
-
-# Проверка GPU в контейнере
 docker exec encoder_frida nvidia-smi
 ```
 
-### Проблемы с памятью
-- Уменьшите `MAX_MODEL_BATCH_SIZE`
-- Установите `MAX_SERVICE_BATCH_SIZE` меньше
-- Увеличьте `shm_size` в docker-compose
+### Очистка
 
-### Проблемы с окончаниями строк (Windows)
 ```bash
-# Перед клонированием настройте Git
-git config --global core.autocrlf input
+# Остановка
+docker compose down
 
-# Или создайте .gitattributes в корне проекта:
-echo "* text=auto" > .gitattributes
-echo "*.py text eol=lf" >> .gitattributes
-echo "dockerfile* text eol=lf" >> .gitattributes
-```
+# Полная очистка (удаление томов)
+docker compose down -v
 
-## Требования к системе
-
-### Минимальные:
-- **CPU**: 2 cores, 4GB RAM
-- **GPU**: 4GB VRAM для моделей ~500MB
-
-### Рекомендуемые:
-- **CPU**: 4 cores, 8GB RAM
-- **GPU**: 8GB+ VRAM для больших батчей
-
-### Проверка GPU:
-```bash
-# Linux
-nvidia-smi
-
-# Docker
-docker run --rm --gpus all nvidia/cuda:12.1-base nvidia-smi
-
-# Python
-python -c "import torch; print(torch.cuda.is_available())"
+# Очистка кэша Docker
+docker system prune -a
 ```
 
 ## Лицензия

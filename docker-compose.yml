@@ -1,67 +1,101 @@
 # docker-compose.yml
+
 services:
-  # # Первый экземпляр - энкодер (frida)
+  # # ============================================
+  # # СЕРВИС 1: ЭНКОДЕР (FRIDA)
+  # # ============================================
   # encoder_frida:
+  #   # Сборка из Dockerfile.service
   #   build:
-  #     context: .
-  #     dockerfile: dockerfile.service
+  #     context: .                    # контекст сборки - текущая директория
+  #     dockerfile: dockerfile.service # какой Dockerfile использовать
+    
+  #   # Проброс портов: хост:контейнер
   #   ports:
   #     - "8260:8260"
+    
+  #   # Тома (хранилища данных)
   #   volumes:
-  #     # Общая папка для моделей
-  #     - ./models:/app/models
-  #     # Отдельная папка для логов первого сервиса
-  #     - ./logs/encoder_frida:/app/logs
+  #     # Именованный том для моделей (общий для обоих сервисов)
+  #     - model_cache:/app/models
+  #     # Именованный том для логов энкодера
+  #     - logs_encoder:/app/logs
+  #     # Почему именованные тома вместо ./models:/app/models?
+  #     # - Именованные тома не зависят от прав на хосте
+  #     # - Работают одинаково на WSL, Linux, Mac
+  #     # - Безопаснее, так как Docker управляет правами сам
+    
+  #   # Файлы с переменными окружения
   #   env_file:
-  #     - .env          # параметры, общие для всех сервисов
-  #     - .env.frida    # специфические параметры первого сервиса
+  #     - .env                       # общие переменные для всех сервисов
+  #     - .env.frida                 # специфичные для энкодера
+    
+  #   # Дополнительные переменные (приоритет выше, чем в .env)
   #   environment:
-  #     - PORT=8260
-  #     - DOCKER_ENV=true
-  #   # Запускаем от пользователя с UID 1000
+  #     - PORT=8260                  # порт для uvicorn
+  #     - DOCKER_ENV=true            # флаг, что мы в Docker
+    
+  #   # Запуск от пользователя с UID 1000 (appuser из Dockerfile)
   #   user: "1000:1000"
+    
+  #   # Имя контейнера (чтобы удобно обращаться)
   #   container_name: encoder_frida
-  #   restart: unless-stopped
-  #   # Убрали создание папки из command - теперь это делается в Dockerfile
-  #   command: >
-  #     uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
-  #     --lifespan on --timeout-graceful-shutdown 15
+    
+  #   # Политика перезапуска
+  #   restart: unless-stopped        # перезапускать, если упал (кроме случая, когда остановили вручную)
+    
+  #   # Команда запуска
+  #   command: uvicorn main:app --port 8260 --host 0.0.0.0 --workers 1
+    
+  #   # init: true - запускать процесс инициализации (PID 1)
+  #   # Это нужно, чтобы сигналы (SIGTERM) корректно обрабатывались
   #   init: true
+    
+  #   # Размер разделяемой памяти (нужно для PyTorch)
   #   shm_size: '2gb'
+    
+  #   # Ограничение памяти
   #   mem_limit: 8g
+    
+  #   # Ограничение CPU
   #   cpus: '4.0'
+    
+  #   # Настройки для GPU
   #   deploy:
   #     resources:
   #       reservations:
   #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]
+  #           - driver: nvidia        # используем NVIDIA GPU
+  #             count: all            # все доступные GPU
+  #             capabilities: [gpu]   # запрашиваем GPU-возможности
 
-  # Второй экземпляр - классификатор (sismetanin toxic pikabu)
+  # ============================================
+  # СЕРВИС 2: КЛАССИФИКАТОР (pikabu)
+  # ============================================
   classifier_pikabu:
     build:
       context: .
       dockerfile: dockerfile.service
+    
     ports:
       - "8265:8265"
+    
     volumes:
-      # Общая папка для моделей
-      - ./models:/app/models
-      # Отдельная папка для логов второго сервиса
-      - ./logs/classifier_pikabu:/app/logs
+      - model_cache:/app/models      # общий том с моделями
+      - logs_classifier:/app/logs    # отдельный том для логов классификатора
+    
     env_file:
-      - .env          # параметры, общие для всех сервисов
-      - .env.pikabu   # специфические параметры второго сервиса
+      - .env
+      - .env.pikabu                  # специфичные для классификатора
+    
     environment:
       - PORT=8265
       - DOCKER_ENV=true
+    
     user: "1000:1000"
     container_name: classifier_pikabu
     restart: unless-stopped
-    command: >
-      uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
-      --lifespan on --timeout-graceful-shutdown 15
+    command: uvicorn main:app --port 8265 --host 0.0.0.0 --workers 1
     init: true
     shm_size: '2gb'
     mem_limit: 8g
@@ -73,3 +107,27 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+# ============================================
+# ОПИСАНИЕ ИМЕНОВАННЫХ ТОМОВ
+# ============================================
+volumes:
+  # Том для моделей (оба сервиса используют один том)
+  model_cache:
+    name: tei_model_cache           # явно задаём имя тома
+  
+  # Том для логов энкодера
+  logs_encoder:
+    name: tei_logs_encoder
+  
+  # Том для логов классификатора
+  logs_classifier:
+    name: tei_logs_classifier
+
+# ============================================
+# ПОЧЕМУ ИМЕНОВАННЫЕ ТОМА?
+# ============================================
+# 1. Docker создаёт и управляет томами сам
+# 2. Не зависит от прав на хосте (нет проблем с WSL)
+# 3. Данные сохраняются даже при удалении контейнеров
+# 4. Тома можно шарить между контейнерами (model_cache общий)
